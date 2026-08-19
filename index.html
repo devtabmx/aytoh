@@ -1,14 +1,26 @@
 <!DOCTYPE html>
 <html lang="es">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Bitácora de Obras - Móvil</title>
-    
+
     <!-- Meta tags para App Móvil (PWA/iOS) -->
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="default">
     <meta name="theme-color" content="#f8fafc">
+
+    <!-- Silenciar avisos informativos de CDN en consola -->
+    <script>
+        (function () {
+            const origWarn = console.warn;
+            console.warn = function (...args) {
+                if (args[0] && typeof args[0] === 'string' && (args[0].includes('cdn.tailwindcss.com') || args[0].includes('Babel transformer'))) return;
+                origWarn.apply(console, args);
+            };
+        })();
+    </script>
 
     <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
@@ -25,6 +37,7 @@
         .uppercase-input {
             text-transform: uppercase;
         }
+
         #map {
             height: 250px;
             border-radius: 0.5rem;
@@ -32,6 +45,7 @@
         }
     </style>
 </head>
+
 <body class="bg-slate-50 text-slate-700 min-h-screen pb-12">
 
     <div id="root"></div>
@@ -39,8 +53,8 @@
     <script type="text/babel">
         const { useState, useEffect, useRef } = React;
 
-        // URL del Web App de Google Apps Script (Reemplazar con tu URL de despliegue)
-        const WEB_APP_URL = "TU_URL_DE_APPLICATIONS_SCRIPT_AQUI";
+        // URL del Web App de Google Apps Script (Configurada desde PROYECTO_OBRAS.md)
+        const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbxp9HvNNlegXeLVowieVkLjUXq9kRqCIEZ4I4PO7U2CzIQG5IxIFwWRLFZ5z8ploU783Q/exec";
 
         // Coordenadas fijas de origen: Ayuntamiento de Huimanguillo, Tabasco
         const ORIGEN_COORDS = [17.83063, -93.38808];
@@ -173,8 +187,8 @@
                 setLoadingModal(true);
                 setModalMsg({ type: 'info', text: 'Guardando obra...' });
 
-                const supervisorFinal = nuevaObra.supervisor === "OTRO" 
-                    ? nuevaObra.nuevo_supervisor.toUpperCase() 
+                const supervisorFinal = nuevaObra.supervisor === "OTRO"
+                    ? nuevaObra.nuevo_supervisor.toUpperCase()
                     : nuevaObra.supervisor.toUpperCase();
 
                 // Ficha extendida que empata con las columnas especificadas para la hoja OBRAS
@@ -199,7 +213,7 @@
                     await fetch(WEB_APP_URL, {
                         method: 'POST',
                         mode: 'no-cors',
-                        headers: { 'Content-Type': 'application/json' },
+                        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
                         body: JSON.stringify(payload)
                     });
 
@@ -262,7 +276,7 @@
                     if (data.routes && data.routes.length > 0) {
                         const distanceKm = (data.routes[0].distance / 1000).toFixed(2);
                         const durationMin = Math.round(data.routes[0].duration / 60);
-                        
+
                         setMapSelection({
                             distancia: `${distanceKm} KM`,
                             tiempo: `${durationMin} MIN`,
@@ -274,7 +288,7 @@
                     const distanceLineal = mapRef.current.distance(ORIGEN_COORDS, [lat, lng]) / 1000;
                     const estKm = (distanceLineal * 1.3).toFixed(2);
                     const estMin = Math.round(estKm * 1.5);
-                    
+
                     setMapSelection({
                         distancia: `${estKm} KM (EST.)`,
                         tiempo: `${estMin} MIN (EST.)`,
@@ -328,8 +342,8 @@
             }, []);
 
             const combustibleUsado = formData.kilometraje ? (parseFloat(formData.kilometraje) / 13).toFixed(2) : '0.00';
-            const costoAprox = (combustibleUsado !== '0.00' && formData.precio_combustible) 
-                ? (parseFloat(combustibleUsado) * parseFloat(formData.precio_combustible)).toFixed(2) 
+            const costoAprox = (combustibleUsado !== '0.00' && formData.precio_combustible)
+                ? (parseFloat(combustibleUsado) * parseFloat(formData.precio_combustible)).toFixed(2)
                 : '0.00';
 
             const handleFileChange = (e, key) => {
@@ -348,7 +362,7 @@
 
                         const ctx = canvas.getContext('2d');
                         ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-                        
+
                         const base64 = canvas.toDataURL('image/jpeg', 0.7);
                         setFotos(prev => ({ ...prev, [key]: base64 }));
                     };
@@ -400,7 +414,7 @@
                     await fetch(WEB_APP_URL, {
                         method: 'POST',
                         mode: 'no-cors',
-                        headers: { 'Content-Type': 'application/json' },
+                        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
                         body: JSON.stringify(payload)
                     });
 
@@ -474,11 +488,11 @@
                         <div className="grid grid-cols-2 gap-3">
                             <div>
                                 <label className="block text-xs font-semibold text-slate-500 uppercase mb-1">Número Obra</label>
-                                <input type="text" disabled value={formData.numero_obra} className="w-full bg-slate-100 border border-slate-200 rounded-lg py-2 px-3 text-sm text-slate-500 focus:outline-none" placeholder="Automático"/>
+                                <input type="text" disabled value={formData.numero_obra} className="w-full bg-slate-100 border border-slate-200 rounded-lg py-2 px-3 text-sm text-slate-500 focus:outline-none" placeholder="Automático" />
                             </div>
                             <div>
                                 <label className="block text-xs font-semibold text-slate-500 uppercase mb-1">Supervisor</label>
-                                <input type="text" disabled value={formData.supervisor} className="w-full bg-slate-100 border border-slate-200 rounded-lg py-2 px-3 text-sm text-slate-500 focus:outline-none" placeholder="Automático"/>
+                                <input type="text" disabled value={formData.supervisor} className="w-full bg-slate-100 border border-slate-200 rounded-lg py-2 px-3 text-sm text-slate-500 focus:outline-none" placeholder="Automático" />
                             </div>
                         </div>
 
@@ -515,11 +529,11 @@
                         <div className="grid grid-cols-2 gap-3">
                             <div>
                                 <label className="block text-xs font-semibold text-slate-500 uppercase mb-1">KMs Recorridos</label>
-                                <input type="text" disabled value={formData.kilometraje} className="w-full bg-slate-100 border border-slate-200 rounded-lg py-2 px-3 text-sm text-slate-600 font-medium focus:outline-none" placeholder="Usa el mapa"/>
+                                <input type="text" disabled value={formData.kilometraje} className="w-full bg-slate-100 border border-slate-200 rounded-lg py-2 px-3 text-sm text-slate-600 font-medium focus:outline-none" placeholder="Usa el mapa" />
                             </div>
                             <div>
                                 <label className="block text-xs font-semibold text-slate-500 uppercase mb-1">Combustible (L)</label>
-                                <input type="text" disabled value={combustibleUsado} className="w-full bg-slate-100 border border-slate-200 rounded-lg py-2 px-3 text-sm text-slate-500 focus:outline-none"/>
+                                <input type="text" disabled value={combustibleUsado} className="w-full bg-slate-100 border border-slate-200 rounded-lg py-2 px-3 text-sm text-slate-500 focus:outline-none" />
                             </div>
                         </div>
 
@@ -527,11 +541,11 @@
                         <div className="grid grid-cols-2 gap-3">
                             <div>
                                 <label className="block text-xs font-semibold text-slate-500 uppercase mb-1">Precio Litro ($)</label>
-                                <input type="number" step="0.01" name="precio_combustible" required value={formData.precio_combustible} onChange={handleInputChange} className="w-full bg-slate-50 border border-slate-200 rounded-lg py-2 px-3 text-sm focus:outline-none focus:border-slate-300" placeholder="0.00"/>
+                                <input type="number" step="0.01" name="precio_combustible" required value={formData.precio_combustible} onChange={handleInputChange} className="w-full bg-slate-50 border border-slate-200 rounded-lg py-2 px-3 text-sm focus:outline-none focus:border-slate-300" placeholder="0.00" />
                             </div>
                             <div>
                                 <label className="block text-xs font-semibold text-slate-500 uppercase mb-1">Costo Aprox ($)</label>
-                                <input type="text" disabled value={costoAprox} className="w-full bg-slate-100 border border-slate-200 rounded-lg py-2 px-3 text-sm text-slate-500 focus:outline-none font-medium"/>
+                                <input type="text" disabled value={costoAprox} className="w-full bg-slate-100 border border-slate-200 rounded-lg py-2 px-3 text-sm text-slate-500 focus:outline-none font-medium" />
                             </div>
                         </div>
 
@@ -591,7 +605,7 @@
                                 {/* 2. Listado Histórico de Fotos (Hoja BITACORA_OBRAS) */}
                                 <div className="space-y-3">
                                     <h4 className="font-semibold text-xs text-slate-500 uppercase tracking-wide">Historial de Visitas y Fotos</h4>
-                                    
+
                                     {loadingEvidencias && (
                                         <p className="text-xs text-slate-400 text-center py-4 animate-pulse">Cargando registros históricos de fotos...</p>
                                     )}
@@ -615,9 +629,9 @@
                                                     <span className="block text-[10px] text-slate-400 font-medium mb-1 text-center">FOTO EVIDENCIA</span>
                                                     {reg.foto_evidencia ? (
                                                         <a href={reg.foto_evidencia} target="_blank" rel="noopener noreferrer">
-                                                            <img 
-                                                                src={formatoDriveDirectUrl(reg.foto_evidencia)} 
-                                                                alt="Evidencia" 
+                                                            <img
+                                                                src={formatoDriveDirectUrl(reg.foto_evidencia)}
+                                                                alt="Evidencia"
                                                                 className="w-full h-24 object-cover rounded-lg border border-slate-100 hover:scale-105 transition"
                                                                 onError={(e) => { e.target.src = "https://placehold.co/150x100?text=Ver+Foto"; }}
                                                             />
@@ -630,9 +644,9 @@
                                                     <span className="block text-[10px] text-slate-400 font-medium mb-1 text-center">FOTO TABLERO</span>
                                                     {reg.foto_tablero ? (
                                                         <a href={reg.foto_tablero} target="_blank" rel="noopener noreferrer">
-                                                            <img 
-                                                                src={formatoDriveDirectUrl(reg.foto_tablero)} 
-                                                                alt="Tablero" 
+                                                            <img
+                                                                src={formatoDriveDirectUrl(reg.foto_tablero)}
+                                                                alt="Tablero"
                                                                 className="w-full h-24 object-cover rounded-lg border border-slate-100 hover:scale-105 transition"
                                                                 onError={(e) => { e.target.src = "https://placehold.co/150x100?text=Ver+Foto"; }}
                                                             />
@@ -661,12 +675,12 @@
                                 <form onSubmit={handleSubmitNuevaObra} className="space-y-3.5">
                                     <div>
                                         <label className="block text-xs font-semibold text-slate-500 uppercase">Número Obra</label>
-                                        <input type="text" name="numero_obra" required value={nuevaObra.numero_obra} onChange={handleNuevaObraChange} className="w-full bg-slate-50 border border-slate-200 rounded-lg py-1.5 px-3 text-sm focus:outline-none uppercase-input" placeholder="Ej: K0001"/>
+                                        <input type="text" name="numero_obra" required value={nuevaObra.numero_obra} onChange={handleNuevaObraChange} className="w-full bg-slate-50 border border-slate-200 rounded-lg py-1.5 px-3 text-sm focus:outline-none uppercase-input" placeholder="Ej: K0001" />
                                     </div>
 
                                     <div>
                                         <label className="block text-xs font-semibold text-slate-500 uppercase">Nombre Obra</label>
-                                        <input type="text" name="nombre_obra" required value={nuevaObra.nombre_obra} onChange={handleNuevaObraChange} className="w-full bg-slate-50 border border-slate-200 rounded-lg py-1.5 px-3 text-sm focus:outline-none uppercase-input" placeholder="Nombre descriptivo"/>
+                                        <input type="text" name="nombre_obra" required value={nuevaObra.nombre_obra} onChange={handleNuevaObraChange} className="w-full bg-slate-50 border border-slate-200 rounded-lg py-1.5 px-3 text-sm focus:outline-none uppercase-input" placeholder="Nombre descriptivo" />
                                     </div>
 
                                     <div>
@@ -677,27 +691,27 @@
                                     <div className="grid grid-cols-2 gap-2">
                                         <div>
                                             <label className="block text-xs font-semibold text-slate-500 uppercase">Calle</label>
-                                            <input type="text" name="calle_obra" required value={nuevaObra.calle_obra} onChange={handleNuevaObraChange} className="w-full bg-slate-50 border border-slate-200 rounded-lg py-1.5 px-3 text-sm focus:outline-none uppercase-input"/>
+                                            <input type="text" name="calle_obra" required value={nuevaObra.calle_obra} onChange={handleNuevaObraChange} className="w-full bg-slate-50 border border-slate-200 rounded-lg py-1.5 px-3 text-sm focus:outline-none uppercase-input" />
                                         </div>
                                         <div>
                                             <label className="block text-xs font-semibold text-slate-500 uppercase">Colonia</label>
-                                            <input type="text" name="colonia" required value={nuevaObra.colonia} onChange={handleNuevaObraChange} className="w-full bg-slate-50 border border-slate-200 rounded-lg py-1.5 px-3 text-sm focus:outline-none uppercase-input"/>
+                                            <input type="text" name="colonia" required value={nuevaObra.colonia} onChange={handleNuevaObraChange} className="w-full bg-slate-50 border border-slate-200 rounded-lg py-1.5 px-3 text-sm focus:outline-none uppercase-input" />
                                         </div>
                                     </div>
 
                                     <div>
                                         <label className="block text-xs font-semibold text-slate-500 uppercase">Meta</label>
-                                        <input type="text" name="meta" required value={nuevaObra.meta} onChange={handleNuevaObraChange} className="w-full bg-slate-50 border border-slate-200 rounded-lg py-1.5 px-3 text-sm focus:outline-none uppercase-input" placeholder="Ej: 500 MTS2"/>
+                                        <input type="text" name="meta" required value={nuevaObra.meta} onChange={handleNuevaObraChange} className="w-full bg-slate-50 border border-slate-200 rounded-lg py-1.5 px-3 text-sm focus:outline-none uppercase-input" placeholder="Ej: 500 MTS2" />
                                     </div>
 
                                     <div className="grid grid-cols-2 gap-2">
                                         <div>
                                             <label className="block text-xs font-semibold text-slate-500 uppercase">Fecha Inicio</label>
-                                            <input type="date" name="fecha_inicio" required value={nuevaObra.fecha_inicio} onChange={handleNuevaObraChange} className="w-full bg-slate-50 border border-slate-200 rounded-lg py-1.5 px-3 text-sm focus:outline-none"/>
+                                            <input type="date" name="fecha_inicio" required value={nuevaObra.fecha_inicio} onChange={handleNuevaObraChange} className="w-full bg-slate-50 border border-slate-200 rounded-lg py-1.5 px-3 text-sm focus:outline-none" />
                                         </div>
                                         <div>
                                             <label className="block text-xs font-semibold text-slate-500 uppercase">Fecha Término</label>
-                                            <input type="date" name="fecha_termino" required value={nuevaObra.fecha_termino} onChange={handleNuevaObraChange} className="w-full bg-slate-50 border border-slate-200 rounded-lg py-1.5 px-3 text-sm focus:outline-none"/>
+                                            <input type="date" name="fecha_termino" required value={nuevaObra.fecha_termino} onChange={handleNuevaObraChange} className="w-full bg-slate-50 border border-slate-200 rounded-lg py-1.5 px-3 text-sm focus:outline-none" />
                                         </div>
                                     </div>
 
@@ -708,7 +722,7 @@
 
                                     <div>
                                         <label className="block text-xs font-semibold text-slate-500 uppercase">Geolocalización (Click en mapa)</label>
-                                        <input type="text" name="geolocalizacion" required value={nuevaObra.geolocalizacion} onChange={handleNuevaObraChange} className="w-full bg-slate-100 border border-slate-200 rounded-lg py-1.5 px-3 text-sm focus:outline-none text-slate-600 font-mono" placeholder="Lat, Lng del mapa"/>
+                                        <input type="text" name="geolocalizacion" required value={nuevaObra.geolocalizacion} onChange={handleNuevaObraChange} className="w-full bg-slate-100 border border-slate-200 rounded-lg py-1.5 px-3 text-sm focus:outline-none text-slate-600 font-mono" placeholder="Lat, Lng del mapa" />
                                     </div>
 
                                     <div>
@@ -724,18 +738,18 @@
                                     {nuevaObra.supervisor === "OTRO" && (
                                         <div>
                                             <label className="block text-xs font-semibold text-slate-500 uppercase">Nuevo Supervisor (Nombre)</label>
-                                            <input type="text" name="nuevo_supervisor" required value={nuevaObra.nuevo_supervisor} onChange={handleNuevaObraChange} className="w-full bg-slate-50 border border-slate-200 rounded-lg py-1.5 px-3 text-sm focus:outline-none uppercase-input" placeholder="Ej: CARLOS GOMEZ"/>
+                                            <input type="text" name="nuevo_supervisor" required value={nuevaObra.nuevo_supervisor} onChange={handleNuevaObraChange} className="w-full bg-slate-50 border border-slate-200 rounded-lg py-1.5 px-3 text-sm focus:outline-none uppercase-input" placeholder="Ej: CARLOS GOMEZ" />
                                         </div>
                                     )}
 
                                     <div className="grid grid-cols-2 gap-2">
                                         <div>
                                             <label className="block text-xs font-semibold text-slate-500 uppercase">Costo ($)</label>
-                                            <input type="number" step="0.01" name="costo" required value={nuevaObra.costo} onChange={handleNuevaObraChange} className="w-full bg-slate-50 border border-slate-200 rounded-lg py-1.5 px-3 text-sm focus:outline-none"/>
+                                            <input type="number" step="0.01" name="costo" required value={nuevaObra.costo} onChange={handleNuevaObraChange} className="w-full bg-slate-50 border border-slate-200 rounded-lg py-1.5 px-3 text-sm focus:outline-none" />
                                         </div>
                                         <div>
                                             <label className="block text-xs font-semibold text-slate-500 uppercase">Origen Recurso</label>
-                                            <input type="text" name="origen_recurso" required value={nuevaObra.origen_recurso} onChange={handleNuevaObraChange} className="w-full bg-slate-50 border border-slate-200 rounded-lg py-1.5 px-3 text-sm focus:outline-none uppercase-input"/>
+                                            <input type="text" name="origen_recurso" required value={nuevaObra.origen_recurso} onChange={handleNuevaObraChange} className="w-full bg-slate-50 border border-slate-200 rounded-lg py-1.5 px-3 text-sm focus:outline-none uppercase-input" />
                                         </div>
                                     </div>
 
@@ -759,4 +773,5 @@
         root.render(<App />);
     </script>
 </body>
+
 </html>
