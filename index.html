@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Bitácora de Obras - Móvil</title>
+    
+    <!-- Meta tags para App Móvil (PWA/iOS) -->
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="default">
+    <meta name="theme-color" content="#f8fafc">
+
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- React y ReactDOM -->
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+    <!-- Babel para compilar JSX -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <!-- Leaflet para el Mapa -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.7.1/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.7.1/dist/leaflet.js"></script>
+
+    <style>
+        /* Forzar visualización de textos en mayúsculas en el formulario */
+        .uppercase-input {
+            text-transform: uppercase;
+        }
+        #map {
+            height: 250px;
+            border-radius: 0.5rem;
+            z-index: 10;
+        }
+    </style>
+</head>
+<body class="bg-slate-50 text-slate-700 min-h-screen pb-12">
+
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef } = React;
+
+        // URL del Web App de Google Apps Script (Reemplazar después de publicar el Script)
+        const WEB_APP_URL = "TU_URL_DE_APPLICATIONS_SCRIPT_AQUI";
+
+        // Coordenadas fijas de origen: Ayuntamiento de Huimanguillo, Tabasco
+        const ORIGEN_COORDS = [17.83063, -93.38808];
+
+        function App() {
+            const [formData, setFormData] = useState({
+                numero_obra: 'K0001',
+                nombre_obra: '',
+                supervisor: 'CARLOS',
+                observaciones: '',
+                kilometraje: '',
+                precio_combustible: '',
+            });
+
+            const [mapSelection, setMapSelection] = useState({
+                distancia: '0.00 km',
+                tiempo: '0 min',
+                coordsDestino: null
+            });
+
+            const [fotos, setFotos] = useState({
+                evidencia: null,
+                tablero: null
+            });
+
+            const [loading, setLoading] = useState(false);
+            const [statusMsg, setStatusMsg] = useState({ type: '', text: '' });
+            const mapRef = useRef(null);
+            const markerRef = useRef(null);
+
+            // Función centralizada para recalcular distancias y actualizar los KMs automáticamente
+            const actualizarRutaYDistancia = async (lat, lng) => {
+                setMapSelection(prev => ({ ...prev, coordsDestino: [lat, lng] }));
+
+                if (markerRef.current) {
+                    markerRef.current.setLatLng([lat, lng]);
+                } else {
+                    markerRef.current = L.marker([lat, lng], { draggable: true }).addTo(mapRef.current);
+                }
+
+                // Calcular ruta vial mediante OSRM
+                try {
+                    const res = await fetch(`https://router.project-osrm.org/route/v1/driving/${ORIGEN_COORDS[1]},${ORIGEN_COORDS[0]};${lng},${lat}?overview=false`);
+                    const data = await res.json();
+                    if (data.routes && data.routes.length > 0) {
+                        const distanceKm = (data.routes[0].distance / 1000).toFixed(2);
+                        const durationMin = Math.round(data.routes[0].duration / 60);
+                        
+                        setMapSelection({
+                            distancia: `${distanceKm} KM`,
+                            tiempo: `${durationMin} MIN`,
+                            coordsDestino: [lat, lng]
+                        });
+                        
+                        // Adecuación: Guardar el kilometraje calculado automáticamente
+                        setFormData(prev => ({ ...prev, kilometraje: distanceKm }));
+                    }
+                } catch (err) {
+                    // Respaldo en caso de fallo de red
+                    const distanceLineal = mapRef.current.distance(ORIGEN_COORDS, [lat, lng]) / 1000;
+                    const estKm = (distanceLineal * 1.3).toFixed(2);
+                    const estMin = Math.round(estKm * 1.5);
+                    
+                    setMapSelection({
+                        distancia: `${estKm} KM (EST.)`,
+                        tiempo: `${estMin} MIN (EST.)`,
+                        coordsDestino: [lat, lng]
+                    });
+                    
+                    setFormData(prev => ({ ...prev, kilometraje: estKm }));
+                }
+            };
+
+            // Utilizar la ubicación por GPS del dispositivo
+            const usarUbicacionDispositivo = () => {
+                if (navigator.geolocation) {
+                    navigator.geolocation.getCurrentPosition(
+                        (position) => {
+                            const { latitude, longitude } = position.coords;
+                            if (mapRef.current) {
+                                mapRef.current.setView([latitude, longitude], 14);
+                                actualizarRutaYDistancia(latitude, longitude);
+                            }
+                        },
+                        (error) => {
+                            console.warn("Error de geolocalización:", error);
+                            alert("No se pudo obtener la geolocalización de tu dispositivo. Asegúrate de dar los permisos correspondientes.");
+                        },
+                        { enableHighAccuracy: true, timeout: 10000 }
+                    );
+                } else {
+                    alert("Tu navegador o dispositivo no soporta la función de geolocalización.");
+                }
+            };
+
+            // Inicializar Mapa
+            useEffect(() => {
+                if (!mapRef.current) {
+                    const map = L.map('map').setView(ORIGEN_COORDS, 13);
+                    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                        attribution: '&copy; OpenStreetMap'
+                    }).addTo(map);
+
+                    // Marcador de Origen Fijo
+                    L.marker(ORIGEN_COORDS, {
+                        title: "Ayuntamiento de Huimanguillo"
+                    }).addTo(map).bindPopup("<b>Origen:</b> Ayuntamiento de Huimanguillo").openPopup();
+
+                    map.on('click', (e) => {
+                        const { lat, lng } = e.latlng;
+                        actualizarRutaYDistancia(lat, lng);
+                    });
+
+                    mapRef.current = map;
+                }
+            }, []);
+
+            // Cálculos Automáticos de combustible
+            const combustibleUsado = formData.kilometraje ? (parseFloat(formData.kilometraje) / 13).toFixed(2) : '0.00';
+            const costoAprox = (combustibleUsado !== '0.00' && formData.precio_combustible) 
+                ? (parseFloat(combustibleUsado) * parseFloat(formData.precio_combustible)).toFixed(2) 
+                : '0.00';
+
+            // Compresión básica de imágenes en cliente
+            const handleFileChange = (e, key) => {
+                const file = e.target.files[0];
+                if (!file) return;
+
+                const reader = new FileReader();
+                reader.onload = (event) => {
+                    const img = new Image();
+                    img.onload = () => {
+                        const canvas = document.createElement('canvas');
+                        const MAX_WIDTH = 1024;
+                        const scale = MAX_WIDTH / img.width;
+                        canvas.width = MAX_WIDTH;
+                        canvas.height = img.height * scale;
+
+                        const ctx = canvas.getContext('2d');
+                        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                        
+                        const base64 = canvas.toDataURL('image/jpeg', 0.7);
+                        setFotos(prev => ({ ...prev, [key]: base64 }));
+                    };
+                    img.src = event.target.result;
+                };
+                reader.readAsDataURL(file);
+            };
+
+            const handleInputChange = (e) => {
+                const { name, value } = e.target;
+                setFormData(prev => ({ ...prev, [name]: value }));
+            };
+
+            const handleSubmit = async (e) => {
+                e.preventDefault();
+                if (WEB_APP_URL === "TU_URL_DE_APPLICATIONS_SCRIPT_AQUI") {
+                    setStatusMsg({ type: 'error', text: 'Error: Configura primero la URL de tu API de Apps Script.' });
+                    return;
+                }
+
+                if (!fotos.evidencia || !fotos.tablero) {
+                    setStatusMsg({ type: 'error', text: 'Debes capturar ambas fotografías (Evidencia y Tablero).' });
+                    return;
+                }
+
+                setLoading(true);
+                setStatusMsg({ type: 'info', text: 'Guardando registro y subiendo imágenes...' });
+
+                const ahora = new Date();
+                const fechaString = ahora.toLocaleString('es-MX', { hour12: false });
+                const dia = String(ahora.getDate()).padStart(2, '0');
+                const mes = ahora.toLocaleString('es-MX', { month: 'long' }).toUpperCase();
+
+                const payload = {
+                    fecha: fechaString,
+                    dia: dia,
+                    mes: mes,
+                    numero_obra: formData.numero_obra.toUpperCase(),
+                    nombre_obra: formData.nombre_obra.toUpperCase(),
+                    supervisor: formData.supervisor.toUpperCase(),
+                    observaciones: formData.observaciones.toUpperCase(),
+                    kilometraje: formData.kilometraje,
+                    combustible: combustibleUsado,
+                    precio_combustible: formData.precio_combustible,
+                    costo_aprox: costoAprox,
+                    distancia: mapSelection.distancia,
+                    tiempo_traslado: mapSelection.tiempo,
+                    foto_evidencia_base64: fotos.evidencia.split(',')[1],
+                    foto_tablero_base64: fotos.tablero.split(',')[1],
+                };
+
+                try {
+                    const response = await fetch(WEB_APP_URL, {
+                        method: 'POST',
+                        mode: 'no-cors',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+
+                    setStatusMsg({ type: 'success', text: '¡Registro guardado correctamente en la bitácora!' });
+                    setFormData({
+                        numero_obra: 'K0001',
+                        nombre_obra: '',
+                        supervisor: 'CARLOS',
+                        observaciones: '',
+                        kilometraje: '',
+                        precio_combustible: '',
+                    });
+                    setFotos({ evidencia: null, tablero: null });
+                } catch (error) {
+                    setStatusMsg({ type: 'error', text: 'Ocurrió un error al enviar el registro.' });
+                } finally {
+                    setLoading(false);
+                }
+            };
+
+            return (
+                <div className="max-w-md mx-auto p-4 md:p-6">
+                    <header className="mb-6 text-center">
+                        <h1 className="text-2xl font-light text-slate-800 tracking-tight">Registro de Obras</h1>
+                        <p className="text-xs text-slate-400 mt-1">H. Ayuntamiento de Huimanguillo</p>
+                    </header>
+
+                    <form onSubmit={handleSubmit} className="bg-white rounded-2xl shadow-sm border border-slate-100 p-5 space-y-5">
+                        
+                        {/* Selector de Obra */}
+                        <div>
+                            <label className="block text-xs font-semibold text-slate-500 uppercase mb-1">Número de Obra</label>
+                            <select 
+                                name="numero_obra" 
+                                value={formData.numero_obra} 
+                                onChange={handleInputChange}
+                                className="w-full bg-slate-50 border border-slate-200 rounded-lg py-2 px-3 text-sm focus:outline-none focus:border-slate-300"
+                            >
+                                <option value="K0001">K0001</option>
+                                <option value="L02333">L02333</option>
+                                <option value="O56222">O56222</option>
+                                <option value="T586666">T586666</option>
+                            </select>
+                        </div>
+
+                        {/* Nombre de la Obra */}
+                        <div>
+                            <label className="block text-xs font-semibold text-slate-500 uppercase mb-1">Nombre de la Obra</label>
+                            <input 
+                                type="text" 
+                                name="nombre_obra"
+                                required
+                                value={formData.nombre_obra}
+                                onChange={handleInputChange}
+                                className="w-full bg-slate-50 border border-slate-200 rounded-lg py-2 px-3 text-sm focus:outline-none focus:border-slate-300 uppercase-input"
+                                placeholder="EJ. PAVIMENTACIÓN CALLE PRINCIPAL"
+                            />
+                        </div>
+
+                        {/* Supervisor */}
+                        <div>
+                            <label className="block text-xs font-semibold text-slate-500 uppercase mb-1">Supervisor asignado</label>
+                            <select 
+                                name="supervisor" 
+                                value={formData.supervisor} 
+                                onChange={handleInputChange}
+                                className="w-full bg-slate-50 border border-slate-200 rounded-lg py-2 px-3 text-sm focus:outline-none focus:border-slate-300"
+                            >
+                                <option value="CARLOS">CARLOS</option>
+                                <option value="JUAN">JUAN</option>
+                                <option value="ALBERTO">ALBERTO</option>
+                            </select>
+                        </div>
+
+                        {/* Mapa - Tiempo de Traslado */}
+                        <div className="relative">
+                            <div className="flex justify-between items-center mb-1">
+                                <label className="block text-xs font-semibold text-slate-500 uppercase">Ubicación de la Obra (Mapa)</label>
+                                <button 
+                                    type="button"
+                                    onClick={usarUbicacionDispositivo}
+                                    className="text-[11px] bg-slate-100 hover:bg-slate-200 text-slate-600 px-2 py-0.5 rounded transition duration-150 flex items-center gap-1"
+                                >
+                                    <svg xmlns="http://www.w3.org/2000/svg" className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" />
+                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" />
+                                    </svg>
+                                    Mi ubicación
+                                </button>
+                            </div>
+                            <div id="map" className="border border-slate-200"></div>
+                            <div className="grid grid-cols-2 gap-2 mt-2 bg-slate-50 p-2.5 rounded-lg text-xs border border-slate-100">
+                                <div><span className="text-slate-400">Distancia:</span> <strong className="text-slate-600 block">{mapSelection.distancia}</strong></div>
+                                <div><span className="text-slate-400">Tiempo Traslado:</span> <strong className="text-slate-600 block">{mapSelection.tiempo}</strong></div>
+                            </div>
+                        </div>
+
+                        {/* Foto Evidencia */}
+                        <div>
+                            <label className="block text-xs font-semibold text-slate-500 uppercase mb-1">Fotografía de Evidencia</label>
+                            {/* Adecuación: Eliminado 'capture' para permitir cámara o biblioteca en móviles */}
+                            <input 
+                                type="file" 
+                                accept="image/*" 
+                                onChange={(e) => handleFileChange(e, 'evidencia')}
+                                className="w-full text-xs text-slate-500 file:mr-3 file:py-2 file:px-3 file:rounded-full file:border-0 file:text-xs file:font-semibold file:bg-slate-100 file:text-slate-600 hover:file:bg-slate-200 cursor-pointer"
+                            />
+                            {fotos.evidencia && <div className="mt-2 text-[10px] text-emerald-600">✓ Fotografía cargada correctamente</div>}
+                        </div>
+
+                        {/* Observaciones */}
+                        <div>
+                            <label className="block text-xs font-semibold text-slate-500 uppercase mb-1">Observaciones</label>
+                            <textarea 
+                                name="observaciones"
+                                rows="2"
+                                value={formData.observaciones}
+                                onChange={handleInputChange}
+                                className="w-full bg-slate-50 border border-slate-200 rounded-lg py-2 px-3 text-sm focus:outline-none focus:border-slate-300 uppercase-input"
+                                placeholder="OBSERVACIONES DE LA JORNADA..."
+                            ></textarea>
+                        </div>
+
+                        {/* Kilometraje y Combustible */}
+                        <div className="grid grid-cols-2 gap-3">
+                            <div>
+                                <label className="block text-xs font-semibold text-slate-500 uppercase mb-1">KMs Recorridos</label>
+                                <input 
+                                    type="text" 
+                                    name="kilometraje"
+                                    required
+                                    disabled
+                                    value={formData.kilometraje}
+                                    className="w-full bg-slate-100 border border-slate-200 rounded-lg py-2 px-3 text-sm text-slate-600 font-medium focus:outline-none"
+                                    placeholder="Use el mapa para definir KMs"
+                                />
+                            </div>
+                            <div>
+                                <label className="block text-xs font-semibold text-slate-500 uppercase mb-1">Combustible (L)</label>
+                                <input 
+                                    type="text" 
+                                    disabled
+                                    value={combustibleUsado}
+                                    className="w-full bg-slate-100 border border-slate-200 rounded-lg py-2 px-3 text-sm text-slate-500 focus:outline-none"
+                                />
+                            </div>
+                        </div>
+
+                        {/* Precios de Combustible */}
+                        <div className="grid grid-cols-2 gap-3">
+                            <div>
+                                <label className="block text-xs font-semibold text-slate-500 uppercase mb-1">Precio Litro ($)</label>
+                                <input 
+                                    type="number" 
+                                    step="0.01"
+                                    name="precio_combustible"
+                                    required
+                                    value={formData.precio_combustible}
+                                    onChange={handleInputChange}
+                                    className="w-full bg-slate-50 border border-slate-200 rounded-lg py-2 px-3 text-sm focus:outline-none focus:border-slate-300"
+                                    placeholder="0.00"
+                                />
+                            </div>
+                            <div>
+                                <label className="block text-xs font-semibold text-slate-500 uppercase mb-1">Costo Aprox ($)</label>
+                                <input 
+                                    type="text" 
+                                    disabled
+                                    value={costoAprox}
+                                    className="w-full bg-slate-100 border border-slate-200 rounded-lg py-2 px-3 text-sm text-slate-500 focus:outline-none font-medium"
+                                />
+                            </div>
+                        </div>
+
+                        {/* Foto Tablero */}
+                        <div>
+                            <label className="block text-xs font-semibold text-slate-500 uppercase mb-1">Fotografía del Tablero</label>
+                            {/* Adecuación: Eliminado 'capture' para permitir cámara o biblioteca en móviles */}
+                            <input 
+                                type="file" 
+                                accept="image/*" 
+                                onChange={(e) => handleFileChange(e, 'tablero')}
+                                className="w-full text-xs text-slate-500 file:mr-3 file:py-2 file:px-3 file:rounded-full file:border-0 file:text-xs file:font-semibold file:bg-slate-100 file:text-slate-600 hover:file:bg-slate-200 cursor-pointer"
+                            />
+                            {fotos.tablero && <div className="mt-2 text-[10px] text-emerald-600">✓ Fotografía cargada correctamente</div>}
+                        </div>
+
+                        {/* Mensaje de Estado */}
+                        {statusMsg.text && (
+                            <div className={`p-3 rounded-lg text-xs font-medium text-center ${
+                                statusMsg.type === 'error' ? 'bg-red-50 text-red-600 border border-red-100' :
+                                statusMsg.type === 'success' ? 'bg-emerald-50 text-emerald-600 border border-emerald-100' :
+                                'bg-blue-50 text-blue-600 border border-blue-100'
+                            }`}>
+                                {statusMsg.text}
+                            </div>
+                        )}
+
+                        {/* Botón de Envío */}
+                        <button
+                            type="submit"
+                            disabled={loading}
+                            className="w-full py-2.5 bg-slate-800 hover:bg-slate-900 text-white rounded-lg font-medium text-sm transition duration-150 disabled:opacity-50"
+                        >
+                            {loading ? 'Enviando Registro...' : 'Guardar en Bitácora'}
+                        </button>
+                    </form>
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
