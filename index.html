@@ -54,7 +54,7 @@
         const { useState, useEffect, useRef } = React;
 
         // URL del Web App de Google Apps Script (Configurada desde PROYECTO_OBRAS.md)
-        const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbw9lctUemALnHiuSrADWKQvrkIRJYRHU4BM2AUlRGnkRNq_VeWUwKjJNEGNNB3W_cFeyg/exec"
+        const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbyEREQMalEl29n3Qmg2-JTC7o3R-ICo8WanRvIijtMDbch-XmJSnmD0BjxMzQgwGhyzGQ/exec"
         // Coordenadas fijas de origen: Ayuntamiento de Huimanguillo, Tabasco
         const ORIGEN_COORDS = [17.83063, -93.38808];
 
@@ -95,7 +95,8 @@
                 coordsDestino: null
             });
 
-            const [fotos, setFotos] = useState({ evidencia: null, tablero: null });
+            const [fotosEvidencia, setFotosEvidencia] = useState([]);
+            const [fotosTablero, setFotosTablero] = useState([]);
             const [loading, setLoading] = useState(false);
             const [loadingModal, setLoadingModal] = useState(false);
             const [statusMsg, setStatusMsg] = useState({ type: '', text: '' });
@@ -104,14 +105,20 @@
             const mapRef = useRef(null);
             const markerRef = useRef(null);
 
-            // Convierte una URL de visualización de Drive a link directo para etiquetas <img>
-            const formatoDriveDirectUrl = (url) => {
-                if (!url) return '';
-                const match = url.match(/\/file\/d\/([^\/]+)/) || url.match(/id=([^&]+)/);
-                if (match && match[1]) {
-                    return `https://docs.google.com/uc?export=view&id=${match[1]}`;
-                }
-                return url;
+            // Convierte una o múltiples URLs de Google Drive a URLs directas visibles para <img>
+            const extraerUrlsDrive = (cadenaUrls) => {
+                if (!cadenaUrls) return [];
+                const lista = String(cadenaUrls).split(/[\n,;]+/).map(u => u.trim()).filter(Boolean);
+                return lista.map(url => {
+                    const match = url.match(/\/file\/d\/([^\/\?]+)/) || url.match(/id=([^&]+)/);
+                    const fileId = match ? match[1] : null;
+                    return {
+                        original: url,
+                        fileId: fileId,
+                        direct: fileId ? `https://lh3.googleusercontent.com/d/${fileId}` : url,
+                        fallback: fileId ? `https://drive.google.com/thumbnail?id=${fileId}&sz=w1000` : url
+                    };
+                });
             };
 
             // Cargar Obras y Supervisores al Iniciar con diagnóstico detallado
@@ -356,29 +363,44 @@
                 ? (parseFloat(combustibleUsado) * parseFloat(formData.precio_combustible)).toFixed(2)
                 : '0.00';
 
-            const handleFileChange = (e, key) => {
-                const file = e.target.files[0];
-                if (!file) return;
+            const handleMultipleFilesChange = (e, tipo) => {
+                const files = Array.from(e.target.files || []);
+                if (files.length === 0) return;
 
-                const reader = new FileReader();
-                reader.onload = (event) => {
-                    const img = new Image();
-                    img.onload = () => {
-                        const canvas = document.createElement('canvas');
-                        const MAX_WIDTH = 1024;
-                        const scale = MAX_WIDTH / img.width;
-                        canvas.width = MAX_WIDTH;
-                        canvas.height = img.height * scale;
+                files.forEach(file => {
+                    const reader = new FileReader();
+                    reader.onload = (event) => {
+                        const img = new Image();
+                        img.onload = () => {
+                            const canvas = document.createElement('canvas');
+                            const MAX_WIDTH = 1024;
+                            const scale = MAX_WIDTH / img.width;
+                            canvas.width = (img.width > MAX_WIDTH) ? MAX_WIDTH : img.width;
+                            canvas.height = (img.width > MAX_WIDTH) ? (img.height * scale) : img.height;
 
-                        const ctx = canvas.getContext('2d');
-                        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                            const ctx = canvas.getContext('2d');
+                            ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
 
-                        const base64 = canvas.toDataURL('image/jpeg', 0.7);
-                        setFotos(prev => ({ ...prev, [key]: base64 }));
+                            const base64 = canvas.toDataURL('image/jpeg', 0.7);
+                            if (tipo === 'evidencia') {
+                                setFotosEvidencia(prev => [...prev, base64]);
+                            } else if (tipo === 'tablero') {
+                                setFotosTablero(prev => [...prev, base64]);
+                            }
+                        };
+                        img.src = event.target.result;
                     };
-                    img.src = event.target.result;
-                };
-                reader.readAsDataURL(file);
+                    reader.readAsDataURL(file);
+                });
+                e.target.value = '';
+            };
+
+            const eliminarFoto = (tipo, index) => {
+                if (tipo === 'evidencia') {
+                    setFotosEvidencia(prev => prev.filter((_, i) => i !== index));
+                } else if (tipo === 'tablero') {
+                    setFotosTablero(prev => prev.filter((_, i) => i !== index));
+                }
             };
 
             const handleInputChange = (e) => {
@@ -388,13 +410,13 @@
 
             const handleSubmit = async (e) => {
                 e.preventDefault();
-                if (!fotos.evidencia || !fotos.tablero) {
-                    setStatusMsg({ type: 'error', text: 'Debes capturar ambas fotografías.' });
+                if (fotosEvidencia.length === 0 || fotosTablero.length === 0) {
+                    setStatusMsg({ type: 'error', text: 'Debes capturar al menos 1 fotografía de evidencia y 1 de tablero.' });
                     return;
                 }
 
                 setLoading(true);
-                setStatusMsg({ type: 'info', text: 'Enviando bitácora a Google Sheets...' });
+                setStatusMsg({ type: 'info', text: 'Enviando bitácora y subiendo fotografías a Google Drive...' });
 
                 const ahora = new Date();
                 const fechaString = ahora.toLocaleString('es-MX', { hour12: false });
@@ -416,8 +438,10 @@
                     costo_aprox: costoAprox,
                     distancia: mapSelection.distancia,
                     tiempo_traslado: mapSelection.tiempo,
-                    foto_evidencia_base64: fotos.evidencia.split(',')[1],
-                    foto_tablero_base64: fotos.tablero.split(',')[1],
+                    fotos_evidencia_base64: fotosEvidencia.map(f => f.split(',')[1]),
+                    fotos_tablero_base64: fotosTablero.map(f => f.split(',')[1]),
+                    foto_evidencia_base64: fotosEvidencia[0].split(',')[1],
+                    foto_tablero_base64: fotosTablero[0].split(',')[1],
                 };
 
                 try {
@@ -428,12 +452,13 @@
                         body: JSON.stringify(payload)
                     });
 
-                    setStatusMsg({ type: 'success', text: '¡Bitácora guardada con éxito!' });
+                    setStatusMsg({ type: 'success', text: `¡Bitácora guardada con éxito! (${fotosEvidencia.length} evidencias, ${fotosTablero.length} tablero)` });
                     setFormData({
                         nombre_obra: '', numero_obra: '', supervisor: '', observaciones: '',
                         kilometraje: '', precio_combustible: '',
                     });
-                    setFotos({ evidencia: null, tablero: null });
+                    setFotosEvidencia([]);
+                    setFotosTablero([]);
                 } catch (error) {
                     setStatusMsg({ type: 'error', text: 'Ocurrió un error en la carga.' });
                 } finally {
@@ -522,11 +547,62 @@
                             </div>
                         </div>
 
-                        {/* Evidencia Foto */}
-                        <div>
-                            <label className="block text-xs font-semibold text-slate-500 uppercase mb-1">Fotografía de Evidencia</label>
-                            <input type="file" accept="image/*" onChange={(e) => handleFileChange(e, 'evidencia')} className="w-full text-xs text-slate-500 file:mr-3 file:py-2 file:px-3 file:rounded-full file:border-0 file:text-xs file:font-semibold file:bg-slate-100 file:text-slate-600 hover:file:bg-slate-200 cursor-pointer" />
-                            {fotos.evidencia && <div className="mt-2 text-[10px] text-emerald-600">✓ Fotografía cargada</div>}
+                        {/* Evidencia Foto (Múltiples / Cámara / Galería) */}
+                        <div className="space-y-2 bg-slate-50 p-3 rounded-xl border border-slate-200">
+                            <div className="flex justify-between items-center">
+                                <label className="block text-xs font-semibold text-slate-600 uppercase">
+                                    Fotos Evidencia ({fotosEvidencia.length})
+                                </label>
+                                {fotosEvidencia.length > 0 && (
+                                    <button
+                                        type="button"
+                                        onClick={() => setFotosEvidencia([])}
+                                        className="text-[10px] text-red-500 hover:underline font-medium"
+                                    >
+                                        Limpiar ({fotosEvidencia.length})
+                                    </button>
+                                )}
+                            </div>
+                            <div className="grid grid-cols-2 gap-2">
+                                <label className="flex items-center justify-center gap-1.5 bg-white hover:bg-slate-100 text-slate-700 py-2 px-2.5 rounded-lg text-xs font-semibold cursor-pointer border border-slate-200 shadow-sm transition active:scale-95">
+                                    <span>📸 Tomar Foto</span>
+                                    <input
+                                        type="file"
+                                        accept="image/*"
+                                        capture="environment"
+                                        onChange={(e) => handleMultipleFilesChange(e, 'evidencia')}
+                                        className="hidden"
+                                    />
+                                </label>
+                                <label className="flex items-center justify-center gap-1.5 bg-white hover:bg-slate-100 text-slate-700 py-2 px-2.5 rounded-lg text-xs font-semibold cursor-pointer border border-slate-200 shadow-sm transition active:scale-95">
+                                    <span>🖼️ Galería (Varias)</span>
+                                    <input
+                                        type="file"
+                                        accept="image/*"
+                                        multiple
+                                        onChange={(e) => handleMultipleFilesChange(e, 'evidencia')}
+                                        className="hidden"
+                                    />
+                                </label>
+                            </div>
+                            {fotosEvidencia.length > 0 && (
+                                <div className="grid grid-cols-3 gap-2 pt-1">
+                                    {fotosEvidencia.map((foto, idx) => (
+                                        <div key={idx} className="relative group rounded-lg overflow-hidden border border-slate-200 aspect-square shadow-sm bg-black">
+                                            <img src={foto} alt={`Evidencia ${idx + 1}`} className="w-full h-full object-cover" />
+                                            <button
+                                                type="button"
+                                                onClick={() => eliminarFoto('evidencia', idx)}
+                                                className="absolute top-1 right-1 bg-red-600/90 hover:bg-red-700 text-white rounded-full w-5 h-5 flex items-center justify-center text-xs shadow font-bold"
+                                                title="Eliminar foto"
+                                            >
+                                                &times;
+                                            </button>
+                                            <span className="absolute bottom-1 left-1 bg-black/70 text-white text-[9px] px-1 rounded font-medium">#{idx + 1}</span>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
                         </div>
 
                         {/* Observaciones */}
@@ -559,18 +635,69 @@
                             </div>
                         </div>
 
-                        {/* Tablero Foto */}
-                        <div>
-                            <label className="block text-xs font-semibold text-slate-500 uppercase mb-1">Fotografía del Tablero</label>
-                            <input type="file" accept="image/*" onChange={(e) => handleFileChange(e, 'tablero')} className="w-full text-xs text-slate-500 file:mr-3 file:py-2 file:px-3 file:rounded-full file:border-0 file:text-xs file:font-semibold file:bg-slate-100 file:text-slate-600 hover:file:bg-slate-200 cursor-pointer" />
-                            {fotos.tablero && <div className="mt-2 text-[10px] text-emerald-600">✓ Fotografía cargada</div>}
+                        {/* Tablero Foto (Múltiples / Cámara / Galería) */}
+                        <div className="space-y-2 bg-slate-50 p-3 rounded-xl border border-slate-200">
+                            <div className="flex justify-between items-center">
+                                <label className="block text-xs font-semibold text-slate-600 uppercase">
+                                    Fotos Tablero ({fotosTablero.length})
+                                </label>
+                                {fotosTablero.length > 0 && (
+                                    <button
+                                        type="button"
+                                        onClick={() => setFotosTablero([])}
+                                        className="text-[10px] text-red-500 hover:underline font-medium"
+                                    >
+                                        Limpiar ({fotosTablero.length})
+                                    </button>
+                                )}
+                            </div>
+                            <div className="grid grid-cols-2 gap-2">
+                                <label className="flex items-center justify-center gap-1.5 bg-white hover:bg-slate-100 text-slate-700 py-2 px-2.5 rounded-lg text-xs font-semibold cursor-pointer border border-slate-200 shadow-sm transition active:scale-95">
+                                    <span>📸 Tomar Foto</span>
+                                    <input
+                                        type="file"
+                                        accept="image/*"
+                                        capture="environment"
+                                        onChange={(e) => handleMultipleFilesChange(e, 'tablero')}
+                                        className="hidden"
+                                    />
+                                </label>
+                                <label className="flex items-center justify-center gap-1.5 bg-white hover:bg-slate-100 text-slate-700 py-2 px-2.5 rounded-lg text-xs font-semibold cursor-pointer border border-slate-200 shadow-sm transition active:scale-95">
+                                    <span>🖼️ Galería (Varias)</span>
+                                    <input
+                                        type="file"
+                                        accept="image/*"
+                                        multiple
+                                        onChange={(e) => handleMultipleFilesChange(e, 'tablero')}
+                                        className="hidden"
+                                    />
+                                </label>
+                            </div>
+                            {fotosTablero.length > 0 && (
+                                <div className="grid grid-cols-3 gap-2 pt-1">
+                                    {fotosTablero.map((foto, idx) => (
+                                        <div key={idx} className="relative group rounded-lg overflow-hidden border border-slate-200 aspect-square shadow-sm bg-black">
+                                            <img src={foto} alt={`Tablero ${idx + 1}`} className="w-full h-full object-cover" />
+                                            <button
+                                                type="button"
+                                                onClick={() => eliminarFoto('tablero', idx)}
+                                                className="absolute top-1 right-1 bg-red-600/90 hover:bg-red-700 text-white rounded-full w-5 h-5 flex items-center justify-center text-xs shadow font-bold"
+                                                title="Eliminar foto"
+                                            >
+                                                &times;
+                                            </button>
+                                            <span className="absolute bottom-1 left-1 bg-black/70 text-white text-[9px] px-1 rounded font-medium">#{idx + 1}</span>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
                         </div>
 
                         {statusMsg.text && (
                             <div className={`p-3 rounded-lg text-xs font-medium text-center ${statusMsg.type === 'error' ? 'bg-red-50 text-red-600' : statusMsg.type === 'success' ? 'bg-emerald-50 text-emerald-600' : 'bg-blue-50 text-blue-600'}`}>{statusMsg.text}</div>
                         )}
 
-                        <button type="submit" disabled={loading} className="w-full py-2.5 bg-slate-800 hover:bg-slate-900 text-white rounded-lg font-medium text-sm transition disabled:opacity-50">{loading ? 'Procesando...' : 'Guardar en Bitácora'}</button>
+                        <button type="submit" disabled={loading} className="w-full py-2.5 bg-slate-800 hover:bg-slate-900 text-white rounded-lg font-medium text-sm transition disabled:opacity-50">{loading ? 'Procesando y guardando fotos...' : 'Guardar en Bitácora'}</button>
                     </form>
 
                     {/* MODAL: CONSULTA DE EVIDENCIAS HISTÓRICAS */}
@@ -624,50 +751,80 @@
                                         <p className="text-xs text-slate-400 text-center py-4">No se encontraron visitas registradas en la bitácora para esta obra.</p>
                                     )}
 
-                                    {historialEvidencias.map((reg, index) => (
-                                        <div key={index} className="bg-white border rounded-xl p-3.5 space-y-2.5 shadow-sm">
-                                            <div className="flex justify-between items-center text-[11px] border-b pb-1 text-slate-400">
-                                                <span>Fecha: <strong className="text-slate-600">{reg.fecha}</strong></span>
-                                                <span>Sup: <strong className="text-slate-600">{reg.supervisor}</strong></span>
-                                            </div>
-                                            {reg.observaciones && (
-                                                <p className="text-xs text-slate-500 bg-slate-50 p-2 rounded italic">"{reg.observaciones}"</p>
-                                            )}
-                                            {/* Galería de fotos */}
-                                            <div className="grid grid-cols-2 gap-2.5 pt-1">
-                                                <div>
-                                                    <span className="block text-[10px] text-slate-400 font-medium mb-1 text-center">FOTO EVIDENCIA</span>
-                                                    {reg.foto_evidencia ? (
-                                                        <a href={reg.foto_evidencia} target="_blank" rel="noopener noreferrer">
-                                                            <img
-                                                                src={formatoDriveDirectUrl(reg.foto_evidencia)}
-                                                                alt="Evidencia"
-                                                                className="w-full h-24 object-cover rounded-lg border border-slate-100 hover:scale-105 transition"
-                                                                onError={(e) => { e.target.src = "https://placehold.co/150x100?text=Ver+Foto"; }}
-                                                            />
-                                                        </a>
+                                    {historialEvidencias.map((reg, index) => {
+                                        const fotosEvidenciaList = extraerUrlsDrive(reg.foto_evidencia);
+                                        const fotosTableroList = extraerUrlsDrive(reg.foto_tablero);
+
+                                        return (
+                                            <div key={index} className="bg-white border rounded-xl p-3.5 space-y-3 shadow-sm">
+                                                <div className="flex justify-between items-center text-[11px] border-b pb-1 text-slate-400">
+                                                    <span>Fecha: <strong className="text-slate-600">{reg.fecha}</strong></span>
+                                                    <span>Sup: <strong className="text-slate-600">{reg.supervisor}</strong></span>
+                                                </div>
+                                                {reg.observaciones && (
+                                                    <p className="text-xs text-slate-600 bg-slate-50 p-2 rounded italic border border-slate-100">"{reg.observaciones}"</p>
+                                                )}
+
+                                                {/* Galería de Fotos de Evidencia */}
+                                                <div className="space-y-1">
+                                                    <span className="block text-[10px] text-slate-500 font-bold uppercase tracking-wider">
+                                                        Evidencia ({fotosEvidenciaList.length})
+                                                    </span>
+                                                    {fotosEvidenciaList.length > 0 ? (
+                                                        <div className="grid grid-cols-2 gap-2">
+                                                            {fotosEvidenciaList.map((imgObj, fIdx) => (
+                                                                <a key={fIdx} href={imgObj.original} target="_blank" rel="noopener noreferrer" className="block relative group rounded-lg overflow-hidden border border-slate-200 shadow-sm aspect-video bg-slate-100">
+                                                                    <img
+                                                                        src={imgObj.direct}
+                                                                        alt={`Evidencia ${fIdx + 1}`}
+                                                                        className="w-full h-full object-cover transition group-hover:scale-105"
+                                                                        loading="lazy"
+                                                                        onError={(e) => {
+                                                                            if (e.target.src !== imgObj.fallback) {
+                                                                                e.target.src = imgObj.fallback;
+                                                                            }
+                                                                        }}
+                                                                    />
+                                                                    <span className="absolute bottom-1 right-1 bg-black/60 text-white text-[9px] px-1.5 py-0.5 rounded font-medium">🔍 Ver foto</span>
+                                                                </a>
+                                                            ))}
+                                                        </div>
                                                     ) : (
-                                                        <span className="block text-[10px] text-slate-300 text-center py-6 border border-dashed rounded-lg">Sin Imagen</span>
+                                                        <span className="block text-[10px] text-slate-300 text-center py-3 border border-dashed rounded-lg">Sin Imagen</span>
                                                     )}
                                                 </div>
-                                                <div>
-                                                    <span className="block text-[10px] text-slate-400 font-medium mb-1 text-center">FOTO TABLERO</span>
-                                                    {reg.foto_tablero ? (
-                                                        <a href={reg.foto_tablero} target="_blank" rel="noopener noreferrer">
-                                                            <img
-                                                                src={formatoDriveDirectUrl(reg.foto_tablero)}
-                                                                alt="Tablero"
-                                                                className="w-full h-24 object-cover rounded-lg border border-slate-100 hover:scale-105 transition"
-                                                                onError={(e) => { e.target.src = "https://placehold.co/150x100?text=Ver+Foto"; }}
-                                                            />
-                                                        </a>
+
+                                                {/* Galería de Fotos de Tablero */}
+                                                <div className="space-y-1">
+                                                    <span className="block text-[10px] text-slate-500 font-bold uppercase tracking-wider">
+                                                        Tablero ({fotosTableroList.length})
+                                                    </span>
+                                                    {fotosTableroList.length > 0 ? (
+                                                        <div className="grid grid-cols-2 gap-2">
+                                                            {fotosTableroList.map((imgObj, tIdx) => (
+                                                                <a key={tIdx} href={imgObj.original} target="_blank" rel="noopener noreferrer" className="block relative group rounded-lg overflow-hidden border border-slate-200 shadow-sm aspect-video bg-slate-100">
+                                                                    <img
+                                                                        src={imgObj.direct}
+                                                                        alt={`Tablero ${tIdx + 1}`}
+                                                                        className="w-full h-full object-cover transition group-hover:scale-105"
+                                                                        loading="lazy"
+                                                                        onError={(e) => {
+                                                                            if (e.target.src !== imgObj.fallback) {
+                                                                                e.target.src = imgObj.fallback;
+                                                                            }
+                                                                        }}
+                                                                    />
+                                                                    <span className="absolute bottom-1 right-1 bg-black/60 text-white text-[9px] px-1.5 py-0.5 rounded font-medium">🔍 Ver foto</span>
+                                                                </a>
+                                                            ))}
+                                                        </div>
                                                     ) : (
-                                                        <span className="block text-[10px] text-slate-300 text-center py-6 border border-dashed rounded-lg">Sin Imagen</span>
+                                                        <span className="block text-[10px] text-slate-300 text-center py-3 border border-dashed rounded-lg">Sin Imagen</span>
                                                     )}
                                                 </div>
                                             </div>
-                                        </div>
-                                    ))}
+                                        );
+                                    })}
                                 </div>
                             </div>
                         </div>
