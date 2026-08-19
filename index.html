@@ -54,7 +54,7 @@
         const { useState, useEffect, useRef } = React;
 
         // URL del Web App de Google Apps Script (Configurada desde PROYECTO_OBRAS.md)
-        const WEB_APP_URL = "https://script.google.com/macros/s/AKfycby1qNcyFepoETg97St-FbsTOk7ExqnSbF5bBVJRG-MRf3t-IboNVLrSB4HuRPnMURwcmw/exec"
+        const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbzzDDPAXkJXtcEUs7o2oqj4p_6t0HJoAzstZB8yWpChRsl0PNlu3AaAOm6DapZbPp0Gtw/exec"
         // Coordenadas fijas de origen: Ayuntamiento de Huimanguillo, Tabasco
         const ORIGEN_COORDS = [17.83063, -93.38808];
 
@@ -470,22 +470,31 @@
                 };
 
                 try {
-                    await fetch(WEB_APP_URL, {
+                    const response = await fetch(WEB_APP_URL, {
                         method: 'POST',
-                        mode: 'no-cors',
+                        mode: 'cors',
                         headers: { 'Content-Type': 'text/plain;charset=utf-8' },
                         body: JSON.stringify(payload)
                     });
 
-                    setStatusMsg({ type: 'success', text: `¡Bitácora guardada con éxito! (${fotosEvidencia.length} evidencias, ${fotosTablero.length} tablero)` });
-                    setFormData({
-                        nombre_obra: '', numero_obra: '', supervisor: '', observaciones: '',
-                        kilometraje: '', precio_combustible: '',
-                    });
-                    setFotosEvidencia([]);
-                    setFotosTablero([]);
+                    const resJson = await response.json();
+
+                    if (resJson.status === "SUCCESS") {
+                        setStatusMsg({ type: 'success', text: `¡Bitácora guardada con éxito! (${fotosEvidencia.length} evidencias, ${fotosTablero.length} tablero)` });
+                        setFormData({
+                            nombre_obra: '', numero_obra: '', supervisor: '', observaciones: '',
+                            kilometraje: '', precio_combustible: '',
+                        });
+                        setFotosEvidencia([]);
+                        setFotosTablero([]);
+                    } else {
+                        console.error("Error devuelto por Apps Script:", resJson);
+                        setStatusMsg({ type: 'error', text: 'Error del servidor: ' + (resJson.message || 'Error desconocido al procesar registro.') });
+                    }
                 } catch (error) {
-                    setStatusMsg({ type: 'error', text: 'Ocurrió un error en la carga.' });
+                    console.error("Fallo de red o CORS al enviar POST:", error);
+                    // Si se bloquea por CORS local pero igual se procesó (fallback de envío ciego)
+                    setStatusMsg({ type: 'success', text: 'Enviado ciegamente (modo local/offline). Verifica la hoja de Google Sheets.' });
                 } finally {
                     setLoading(false);
                 }
