@@ -22,7 +22,6 @@
     <script src="https://unpkg.com/leaflet@1.7.1/dist/leaflet.js"></script>
 
     <style>
-        /* Forzar visualización de textos en mayúsculas en el formulario */
         .uppercase-input {
             text-transform: uppercase;
         }
@@ -40,21 +39,42 @@
     <script type="text/babel">
         const { useState, useEffect, useRef } = React;
 
-        // URL del Web App de Google Apps Script (Reemplazar después de publicar el Script)
+        // URL del Web App de Google Apps Script (Reemplazar con tu URL de despliegue)
         const WEB_APP_URL = "TU_URL_DE_APPLICATIONS_SCRIPT_AQUI";
 
         // Coordenadas fijas de origen: Ayuntamiento de Huimanguillo, Tabasco
         const ORIGEN_COORDS = [17.83063, -93.38808];
 
         function App() {
+            // Catálogos cargados de Google Sheets
+            const [obrasDb, setObrasDb] = useState([]);
+            const [supervisoresDb, setSupervisoresDb] = useState(['CARLOS', 'JUAN', 'ALBERTO']);
+
+            // Formulario principal (Bitácora)
             const [formData, setFormData] = useState({
-                numero_obra: 'K0001',
                 nombre_obra: '',
-                supervisor: 'CARLOS',
+                numero_obra: '',
+                supervisor: '',
                 observaciones: '',
                 kilometraje: '',
                 precio_combustible: '',
             });
+
+            // Formulario de Nueva Obra (Modal)
+            const [showModal, setShowModal] = useState(false);
+            const [nuevaObra, setNuevaObra] = useState({
+                numero_obra: '', nombre_obra: '', descripcion: '', calle_obra: '',
+                meta: '', fecha_inicio: '', fecha_termino: '', colonia: '',
+                geolocalizacion: '', supervisor: 'CARLOS', nuevo_supervisor: '',
+                costo: '', origen_recurso: ''
+            });
+
+            // Modal de Consulta de Evidencias Históricas
+            const [showEvidenciasModal, setShowEvidenciasModal] = useState(false);
+            const [selectedObraEvidencia, setSelectedObraEvidencia] = useState('');
+            const [fichaTecnicaObra, setFichaTecnicaObra] = useState(null);
+            const [historialEvidencias, setHistorialEvidencias] = useState([]);
+            const [loadingEvidencias, setLoadingEvidencias] = useState(false);
 
             const [mapSelection, setMapSelection] = useState({
                 distancia: '0.00 km',
@@ -62,17 +82,171 @@
                 coordsDestino: null
             });
 
-            const [fotos, setFotos] = useState({
-                evidencia: null,
-                tablero: null
-            });
-
+            const [fotos, setFotos] = useState({ evidencia: null, tablero: null });
             const [loading, setLoading] = useState(false);
+            const [loadingModal, setLoadingModal] = useState(false);
             const [statusMsg, setStatusMsg] = useState({ type: '', text: '' });
+            const [modalMsg, setModalMsg] = useState({ type: '', text: '' });
+
             const mapRef = useRef(null);
             const markerRef = useRef(null);
 
-            // Función centralizada para recalcular distancias y actualizar los KMs automáticamente
+            // Convierte una URL de visualización de Drive a link directo para etiquetas <img>
+            const formatoDriveDirectUrl = (url) => {
+                if (!url) return '';
+                const match = url.match(/\/file\/d\/([^\/]+)/) || url.match(/id=([^&]+)/);
+                if (match && match[1]) {
+                    return `https://docs.google.com/uc?export=view&id=${match[1]}`;
+                }
+                return url;
+            };
+
+            // Cargar Obras y Supervisores al Iniciar
+            const cargarCatalogoObras = async () => {
+                if (WEB_APP_URL === "TU_URL_DE_APPLICATIONS_SCRIPT_AQUI") return;
+                try {
+                    const response = await fetch(`${WEB_APP_URL}?action=get_obras`);
+                    const data = await response.json();
+                    if (data.status === "SUCCESS") {
+                        setObrasDb(data.obras || []);
+                        if (data.supervisores && data.supervisores.length > 0) {
+                            setSupervisoresDb(data.supervisores);
+                        }
+                    }
+                } catch (error) {
+                    console.error("Error cargando catálogos de obras", error);
+                }
+            };
+
+            useEffect(() => {
+                cargarCatalogoObras();
+            }, []);
+
+            // Handler para cargar ficha técnica e historial de evidencias de una obra específica
+            const handleObraEvidenciaSelect = async (e) => {
+                const nombreObra = e.target.value;
+                setSelectedObraEvidencia(nombreObra);
+                setFichaTecnicaObra(null);
+                setHistorialEvidencias([]);
+
+                if (!nombreObra) return;
+
+                // 1. Cargar datos técnicos locales de la obra seleccionada
+                const obraDetalle = obrasDb.find(o => o.nombre_obra === nombreObra);
+                if (obraDetalle) {
+                    setFichaTecnicaObra(obraDetalle);
+                }
+
+                // 2. Consultar registros históricos de bitácora por API
+                setLoadingEvidencias(true);
+                try {
+                    const response = await fetch(`${WEB_APP_URL}?action=get_evidencias&obra=${encodeURIComponent(nombreObra)}`);
+                    const data = await response.json();
+                    if (data.status === "SUCCESS") {
+                        setHistorialEvidencias(data.registros || []);
+                    }
+                } catch (error) {
+                    console.error("Error al consultar evidencias históricas", error);
+                } finally {
+                    setLoadingEvidencias(false);
+                }
+            };
+
+            // Cálculo de DÍAS_PLAZO
+            const calcularDiasPlazo = () => {
+                if (!nuevaObra.fecha_inicio || !nuevaObra.fecha_termino) return 0;
+                const inicio = new Date(nuevaObra.fecha_inicio);
+                const termino = new Date(nuevaObra.fecha_termino);
+                const diffTime = termino - inicio;
+                if (diffTime < 0) return 0;
+                return Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+            };
+
+            const handleNuevaObraChange = (e) => {
+                const { name, value } = e.target;
+                setNuevaObra(prev => ({ ...prev, [name]: value }));
+            };
+
+            // Enviar Nueva Obra a Google Sheets
+            const handleSubmitNuevaObra = async (e) => {
+                e.preventDefault();
+                setLoadingModal(true);
+                setModalMsg({ type: 'info', text: 'Guardando obra...' });
+
+                const supervisorFinal = nuevaObra.supervisor === "OTRO" 
+                    ? nuevaObra.nuevo_supervisor.toUpperCase() 
+                    : nuevaObra.supervisor.toUpperCase();
+
+                // Ficha extendida que empata con las columnas especificadas para la hoja OBRAS
+                const payload = {
+                    action: "save_obra",
+                    numero_obra: nuevaObra.numero_obra.toUpperCase(),
+                    nombre_obra: nuevaObra.nombre_obra.toUpperCase(),
+                    descripcion: nuevaObra.descripcion.toUpperCase(),
+                    calle_obra: nuevaObra.calle_obra.toUpperCase(),
+                    meta: nuevaObra.meta.toUpperCase(),
+                    fecha_inicio: nuevaObra.fecha_inicio,
+                    fecha_termino: nuevaObra.fecha_termino,
+                    dias_plazo: calcularDiasPlazo(),
+                    colonia: nuevaObra.colonia.toUpperCase(),
+                    geolocalizacion: nuevaObra.geolocalizacion,
+                    supervisor: supervisorFinal,
+                    costo: nuevaObra.costo,
+                    origen_recurso: nuevaObra.origen_recurso.toUpperCase()
+                };
+
+                try {
+                    await fetch(WEB_APP_URL, {
+                        method: 'POST',
+                        mode: 'no-cors',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+
+                    setModalMsg({ type: 'success', text: 'Obra guardada exitosamente.' });
+                    setTimeout(() => {
+                        setShowModal(false);
+                        setNuevaObra({
+                            numero_obra: '', nombre_obra: '', descripcion: '', calle_obra: '',
+                            meta: '', fecha_inicio: '', fecha_termino: '', colonia: '',
+                            geolocalizacion: '', supervisor: 'CARLOS', nuevo_supervisor: '',
+                            costo: '', origen_recurso: ''
+                        });
+                        setModalMsg({ type: '', text: '' });
+                        cargarCatalogoObras();
+                    }, 1500);
+                } catch (error) {
+                    setModalMsg({ type: 'error', text: 'Error al registrar obra.' });
+                } finally {
+                    setLoadingModal(false);
+                }
+            };
+
+            // Al seleccionar una Obra del dropdown principal
+            const handleObraSelectChange = (e) => {
+                const nombreSel = e.target.value;
+                const obraEncontrada = obrasDb.find(o => o.nombre_obra === nombreSel);
+
+                if (obraEncontrada) {
+                    setFormData(prev => ({
+                        ...prev,
+                        nombre_obra: nombreSel,
+                        numero_obra: obraEncontrada.numero_obra,
+                        supervisor: obraEncontrada.supervisor
+                    }));
+
+                    if (obraEncontrada.geolocalizacion) {
+                        const coords = obraEncontrada.geolocalizacion.split(',').map(Number);
+                        if (coords.length === 2 && !isNaN(coords[0]) && !isNaN(coords[1])) {
+                            mapRef.current.setView(coords, 14);
+                            actualizarRutaYDistancia(coords[0], coords[1]);
+                        }
+                    }
+                } else {
+                    setFormData(prev => ({ ...prev, nombre_obra: nombreSel, numero_obra: '', supervisor: '' }));
+                }
+            };
+
             const actualizarRutaYDistancia = async (lat, lng) => {
                 setMapSelection(prev => ({ ...prev, coordsDestino: [lat, lng] }));
 
@@ -82,7 +256,6 @@
                     markerRef.current = L.marker([lat, lng], { draggable: true }).addTo(mapRef.current);
                 }
 
-                // Calcular ruta vial mediante OSRM
                 try {
                     const res = await fetch(`https://router.project-osrm.org/route/v1/driving/${ORIGEN_COORDS[1]},${ORIGEN_COORDS[0]};${lng},${lat}?overview=false`);
                     const data = await res.json();
@@ -95,12 +268,9 @@
                             tiempo: `${durationMin} MIN`,
                             coordsDestino: [lat, lng]
                         });
-                        
-                        // Adecuación: Guardar el kilometraje calculado automáticamente
                         setFormData(prev => ({ ...prev, kilometraje: distanceKm }));
                     }
                 } catch (err) {
-                    // Respaldo en caso de fallo de red
                     const distanceLineal = mapRef.current.distance(ORIGEN_COORDS, [lat, lng]) / 1000;
                     const estKm = (distanceLineal * 1.3).toFixed(2);
                     const estMin = Math.round(estKm * 1.5);
@@ -110,12 +280,17 @@
                         tiempo: `${estMin} MIN (EST.)`,
                         coordsDestino: [lat, lng]
                     });
-                    
                     setFormData(prev => ({ ...prev, kilometraje: estKm }));
                 }
             };
 
-            // Utilizar la ubicación por GPS del dispositivo
+            const irAlAyuntamiento = () => {
+                if (mapRef.current) {
+                    mapRef.current.setView(ORIGEN_COORDS, 14);
+                    actualizarRutaYDistancia(ORIGEN_COORDS[0], ORIGEN_COORDS[1]);
+                }
+            };
+
             const usarUbicacionDispositivo = () => {
                 if (navigator.geolocation) {
                     navigator.geolocation.getCurrentPosition(
@@ -126,14 +301,9 @@
                                 actualizarRutaYDistancia(latitude, longitude);
                             }
                         },
-                        (error) => {
-                            console.warn("Error de geolocalización:", error);
-                            alert("No se pudo obtener la geolocalización de tu dispositivo. Asegúrate de dar los permisos correspondientes.");
-                        },
+                        () => alert("Permiso de localización denegado."),
                         { enableHighAccuracy: true, timeout: 10000 }
                     );
-                } else {
-                    alert("Tu navegador o dispositivo no soporta la función de geolocalización.");
                 }
             };
 
@@ -145,27 +315,23 @@
                         attribution: '&copy; OpenStreetMap'
                     }).addTo(map);
 
-                    // Marcador de Origen Fijo
-                    L.marker(ORIGEN_COORDS, {
-                        title: "Ayuntamiento de Huimanguillo"
-                    }).addTo(map).bindPopup("<b>Origen:</b> Ayuntamiento de Huimanguillo").openPopup();
+                    L.marker(ORIGEN_COORDS, { title: "Ayuntamiento" }).addTo(map).bindPopup("<b>Ayuntamiento de Huimanguillo</b>").openPopup();
 
                     map.on('click', (e) => {
                         const { lat, lng } = e.latlng;
                         actualizarRutaYDistancia(lat, lng);
+                        setNuevaObra(prev => ({ ...prev, geolocalizacion: `${lat.toFixed(6)},${lng.toFixed(6)}` }));
                     });
 
                     mapRef.current = map;
                 }
             }, []);
 
-            // Cálculos Automáticos de combustible
             const combustibleUsado = formData.kilometraje ? (parseFloat(formData.kilometraje) / 13).toFixed(2) : '0.00';
             const costoAprox = (combustibleUsado !== '0.00' && formData.precio_combustible) 
                 ? (parseFloat(combustibleUsado) * parseFloat(formData.precio_combustible)).toFixed(2) 
                 : '0.00';
 
-            // Compresión básica de imágenes en cliente
             const handleFileChange = (e, key) => {
                 const file = e.target.files[0];
                 if (!file) return;
@@ -198,18 +364,13 @@
 
             const handleSubmit = async (e) => {
                 e.preventDefault();
-                if (WEB_APP_URL === "TU_URL_DE_APPLICATIONS_SCRIPT_AQUI") {
-                    setStatusMsg({ type: 'error', text: 'Error: Configura primero la URL de tu API de Apps Script.' });
-                    return;
-                }
-
                 if (!fotos.evidencia || !fotos.tablero) {
-                    setStatusMsg({ type: 'error', text: 'Debes capturar ambas fotografías (Evidencia y Tablero).' });
+                    setStatusMsg({ type: 'error', text: 'Debes capturar ambas fotografías.' });
                     return;
                 }
 
                 setLoading(true);
-                setStatusMsg({ type: 'info', text: 'Guardando registro y subiendo imágenes...' });
+                setStatusMsg({ type: 'info', text: 'Enviando bitácora a Google Sheets...' });
 
                 const ahora = new Date();
                 const fechaString = ahora.toLocaleString('es-MX', { hour12: false });
@@ -217,10 +378,11 @@
                 const mes = ahora.toLocaleString('es-MX', { month: 'long' }).toUpperCase();
 
                 const payload = {
+                    action: "save_bitacora",
                     fecha: fechaString,
                     dia: dia,
                     mes: mes,
-                    numero_obra: formData.numero_obra.toUpperCase(),
+                    numero_obra: formData.numero_obra,
                     nombre_obra: formData.nombre_obra.toUpperCase(),
                     supervisor: formData.supervisor.toUpperCase(),
                     observaciones: formData.observaciones.toUpperCase(),
@@ -235,99 +397,99 @@
                 };
 
                 try {
-                    const response = await fetch(WEB_APP_URL, {
+                    await fetch(WEB_APP_URL, {
                         method: 'POST',
                         mode: 'no-cors',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify(payload)
                     });
 
-                    setStatusMsg({ type: 'success', text: '¡Registro guardado correctamente en la bitácora!' });
+                    setStatusMsg({ type: 'success', text: '¡Bitácora guardada con éxito!' });
                     setFormData({
-                        numero_obra: 'K0001',
-                        nombre_obra: '',
-                        supervisor: 'CARLOS',
-                        observaciones: '',
-                        kilometraje: '',
-                        precio_combustible: '',
+                        nombre_obra: '', numero_obra: '', supervisor: '', observaciones: '',
+                        kilometraje: '', precio_combustible: '',
                     });
                     setFotos({ evidencia: null, tablero: null });
                 } catch (error) {
-                    setStatusMsg({ type: 'error', text: 'Ocurrió un error al enviar el registro.' });
+                    setStatusMsg({ type: 'error', text: 'Ocurrió un error en la carga.' });
                 } finally {
                     setLoading(false);
                 }
             };
 
             return (
-                <div className="max-w-md mx-auto p-4 md:p-6">
-                    <header className="mb-6 text-center">
-                        <h1 className="text-2xl font-light text-slate-800 tracking-tight">Registro de Obras</h1>
-                        <p className="text-xs text-slate-400 mt-1">H. Ayuntamiento de Huimanguillo</p>
+                <div className="max-w-md mx-auto p-4 md:p-6 relative">
+                    <header className="mb-6 flex justify-between items-center flex-wrap gap-2">
+                        <div>
+                            <h1 className="text-2xl font-light text-slate-800 tracking-tight">Bitácora</h1>
+                            <p className="text-xs text-slate-400">Huimanguillo, Tabasco</p>
+                        </div>
+                        {/* Botonera Principal */}
+                        <div className="flex gap-1.5">
+                            <button
+                                type="button"
+                                onClick={cargarCatalogoObras}
+                                className="bg-slate-100 hover:bg-slate-200 text-slate-600 px-2.5 py-1.5 rounded-lg text-xs font-semibold border border-slate-200 transition"
+                                title="Actualizar catálogos"
+                            >
+                                Refrescar
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => setShowEvidenciasModal(true)}
+                                className="bg-emerald-50 hover:bg-emerald-100 text-emerald-600 px-2.5 py-1.5 rounded-lg text-xs font-semibold border border-emerald-100 transition"
+                            >
+                                Evidencias
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => setShowModal(true)}
+                                className="bg-indigo-50 hover:bg-indigo-100 text-indigo-600 px-2.5 py-1.5 rounded-lg text-xs font-semibold border border-indigo-100 transition"
+                            >
+                                + Nueva Obra
+                            </button>
+                        </div>
                     </header>
 
+                    {/* Formulario Principal */}
                     <form onSubmit={handleSubmit} className="bg-white rounded-2xl shadow-sm border border-slate-100 p-5 space-y-5">
-                        
-                        {/* Selector de Obra */}
-                        <div>
-                            <label className="block text-xs font-semibold text-slate-500 uppercase mb-1">Número de Obra</label>
-                            <select 
-                                name="numero_obra" 
-                                value={formData.numero_obra} 
-                                onChange={handleInputChange}
-                                className="w-full bg-slate-50 border border-slate-200 rounded-lg py-2 px-3 text-sm focus:outline-none focus:border-slate-300"
-                            >
-                                <option value="K0001">K0001</option>
-                                <option value="L02333">L02333</option>
-                                <option value="O56222">O56222</option>
-                                <option value="T586666">T586666</option>
-                            </select>
-                        </div>
-
-                        {/* Nombre de la Obra */}
+                        {/* Dropdown Obra */}
                         <div>
                             <label className="block text-xs font-semibold text-slate-500 uppercase mb-1">Nombre de la Obra</label>
-                            <input 
-                                type="text" 
+                            <select
                                 name="nombre_obra"
-                                required
                                 value={formData.nombre_obra}
-                                onChange={handleInputChange}
-                                className="w-full bg-slate-50 border border-slate-200 rounded-lg py-2 px-3 text-sm focus:outline-none focus:border-slate-300 uppercase-input"
-                                placeholder="EJ. PAVIMENTACIÓN CALLE PRINCIPAL"
-                            />
-                        </div>
-
-                        {/* Supervisor */}
-                        <div>
-                            <label className="block text-xs font-semibold text-slate-500 uppercase mb-1">Supervisor asignado</label>
-                            <select 
-                                name="supervisor" 
-                                value={formData.supervisor} 
-                                onChange={handleInputChange}
+                                onChange={handleObraSelectChange}
+                                required
                                 className="w-full bg-slate-50 border border-slate-200 rounded-lg py-2 px-3 text-sm focus:outline-none focus:border-slate-300"
                             >
-                                <option value="CARLOS">CARLOS</option>
-                                <option value="JUAN">JUAN</option>
-                                <option value="ALBERTO">ALBERTO</option>
+                                <option value="">-- SELECCIONE UNA OBRA --</option>
+                                {obrasDb.map((obra, idx) => (
+                                    <option key={idx} value={obra.nombre_obra}>{obra.nombre_obra}</option>
+                                ))}
                             </select>
                         </div>
 
-                        {/* Mapa - Tiempo de Traslado */}
+                        {/* Campos de lectura */}
+                        <div className="grid grid-cols-2 gap-3">
+                            <div>
+                                <label className="block text-xs font-semibold text-slate-500 uppercase mb-1">Número Obra</label>
+                                <input type="text" disabled value={formData.numero_obra} className="w-full bg-slate-100 border border-slate-200 rounded-lg py-2 px-3 text-sm text-slate-500 focus:outline-none" placeholder="Automático"/>
+                            </div>
+                            <div>
+                                <label className="block text-xs font-semibold text-slate-500 uppercase mb-1">Supervisor</label>
+                                <input type="text" disabled value={formData.supervisor} className="w-full bg-slate-100 border border-slate-200 rounded-lg py-2 px-3 text-sm text-slate-500 focus:outline-none" placeholder="Automático"/>
+                            </div>
+                        </div>
+
+                        {/* Mapa Geolocalización */}
                         <div className="relative">
                             <div className="flex justify-between items-center mb-1">
-                                <label className="block text-xs font-semibold text-slate-500 uppercase">Ubicación de la Obra (Mapa)</label>
-                                <button 
-                                    type="button"
-                                    onClick={usarUbicacionDispositivo}
-                                    className="text-[11px] bg-slate-100 hover:bg-slate-200 text-slate-600 px-2 py-0.5 rounded transition duration-150 flex items-center gap-1"
-                                >
-                                    <svg xmlns="http://www.w3.org/2000/svg" className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z" />
-                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 11a3 3 0 11-6 0 3 3 0 016 0z" />
-                                    </svg>
-                                    Mi ubicación
-                                </button>
+                                <label className="block text-xs font-semibold text-slate-500 uppercase">Ubicación</label>
+                                <div className="flex gap-1">
+                                    <button type="button" onClick={irAlAyuntamiento} className="text-[10px] bg-slate-100 hover:bg-slate-200 text-slate-600 px-2 py-0.5 rounded font-medium">Ayuntamiento</button>
+                                    <button type="button" onClick={usarUbicacionDispositivo} className="text-[10px] bg-slate-100 hover:bg-slate-200 text-slate-600 px-2 py-0.5 rounded font-medium">Mi ubicación</button>
+                                </div>
                             </div>
                             <div id="map" className="border border-slate-200"></div>
                             <div className="grid grid-cols-2 gap-2 mt-2 bg-slate-50 p-2.5 rounded-lg text-xs border border-slate-100">
@@ -336,116 +498,259 @@
                             </div>
                         </div>
 
-                        {/* Foto Evidencia */}
+                        {/* Evidencia Foto */}
                         <div>
                             <label className="block text-xs font-semibold text-slate-500 uppercase mb-1">Fotografía de Evidencia</label>
-                            {/* Adecuación: Eliminado 'capture' para permitir cámara o biblioteca en móviles */}
-                            <input 
-                                type="file" 
-                                accept="image/*" 
-                                onChange={(e) => handleFileChange(e, 'evidencia')}
-                                className="w-full text-xs text-slate-500 file:mr-3 file:py-2 file:px-3 file:rounded-full file:border-0 file:text-xs file:font-semibold file:bg-slate-100 file:text-slate-600 hover:file:bg-slate-200 cursor-pointer"
-                            />
-                            {fotos.evidencia && <div className="mt-2 text-[10px] text-emerald-600">✓ Fotografía cargada correctamente</div>}
+                            <input type="file" accept="image/*" onChange={(e) => handleFileChange(e, 'evidencia')} className="w-full text-xs text-slate-500 file:mr-3 file:py-2 file:px-3 file:rounded-full file:border-0 file:text-xs file:font-semibold file:bg-slate-100 file:text-slate-600 hover:file:bg-slate-200 cursor-pointer" />
+                            {fotos.evidencia && <div className="mt-2 text-[10px] text-emerald-600">✓ Fotografía cargada</div>}
                         </div>
 
                         {/* Observaciones */}
                         <div>
                             <label className="block text-xs font-semibold text-slate-500 uppercase mb-1">Observaciones</label>
-                            <textarea 
-                                name="observaciones"
-                                rows="2"
-                                value={formData.observaciones}
-                                onChange={handleInputChange}
-                                className="w-full bg-slate-50 border border-slate-200 rounded-lg py-2 px-3 text-sm focus:outline-none focus:border-slate-300 uppercase-input"
-                                placeholder="OBSERVACIONES DE LA JORNADA..."
-                            ></textarea>
+                            <textarea name="observaciones" rows="2" value={formData.observaciones} onChange={handleInputChange} className="w-full bg-slate-50 border border-slate-200 rounded-lg py-2 px-3 text-sm focus:outline-none focus:border-slate-300 uppercase-input" placeholder="OBSERVACIONES DE CAMPO..."></textarea>
                         </div>
 
-                        {/* Kilometraje y Combustible */}
+                        {/* KMs y Combustible */}
                         <div className="grid grid-cols-2 gap-3">
                             <div>
                                 <label className="block text-xs font-semibold text-slate-500 uppercase mb-1">KMs Recorridos</label>
-                                <input 
-                                    type="text" 
-                                    name="kilometraje"
-                                    required
-                                    disabled
-                                    value={formData.kilometraje}
-                                    className="w-full bg-slate-100 border border-slate-200 rounded-lg py-2 px-3 text-sm text-slate-600 font-medium focus:outline-none"
-                                    placeholder="Use el mapa para definir KMs"
-                                />
+                                <input type="text" disabled value={formData.kilometraje} className="w-full bg-slate-100 border border-slate-200 rounded-lg py-2 px-3 text-sm text-slate-600 font-medium focus:outline-none" placeholder="Usa el mapa"/>
                             </div>
                             <div>
                                 <label className="block text-xs font-semibold text-slate-500 uppercase mb-1">Combustible (L)</label>
-                                <input 
-                                    type="text" 
-                                    disabled
-                                    value={combustibleUsado}
-                                    className="w-full bg-slate-100 border border-slate-200 rounded-lg py-2 px-3 text-sm text-slate-500 focus:outline-none"
-                                />
+                                <input type="text" disabled value={combustibleUsado} className="w-full bg-slate-100 border border-slate-200 rounded-lg py-2 px-3 text-sm text-slate-500 focus:outline-none"/>
                             </div>
                         </div>
 
-                        {/* Precios de Combustible */}
+                        {/* Precios combustible */}
                         <div className="grid grid-cols-2 gap-3">
                             <div>
                                 <label className="block text-xs font-semibold text-slate-500 uppercase mb-1">Precio Litro ($)</label>
-                                <input 
-                                    type="number" 
-                                    step="0.01"
-                                    name="precio_combustible"
-                                    required
-                                    value={formData.precio_combustible}
-                                    onChange={handleInputChange}
-                                    className="w-full bg-slate-50 border border-slate-200 rounded-lg py-2 px-3 text-sm focus:outline-none focus:border-slate-300"
-                                    placeholder="0.00"
-                                />
+                                <input type="number" step="0.01" name="precio_combustible" required value={formData.precio_combustible} onChange={handleInputChange} className="w-full bg-slate-50 border border-slate-200 rounded-lg py-2 px-3 text-sm focus:outline-none focus:border-slate-300" placeholder="0.00"/>
                             </div>
                             <div>
                                 <label className="block text-xs font-semibold text-slate-500 uppercase mb-1">Costo Aprox ($)</label>
-                                <input 
-                                    type="text" 
-                                    disabled
-                                    value={costoAprox}
-                                    className="w-full bg-slate-100 border border-slate-200 rounded-lg py-2 px-3 text-sm text-slate-500 focus:outline-none font-medium"
-                                />
+                                <input type="text" disabled value={costoAprox} className="w-full bg-slate-100 border border-slate-200 rounded-lg py-2 px-3 text-sm text-slate-500 focus:outline-none font-medium"/>
                             </div>
                         </div>
 
-                        {/* Foto Tablero */}
+                        {/* Tablero Foto */}
                         <div>
                             <label className="block text-xs font-semibold text-slate-500 uppercase mb-1">Fotografía del Tablero</label>
-                            {/* Adecuación: Eliminado 'capture' para permitir cámara o biblioteca en móviles */}
-                            <input 
-                                type="file" 
-                                accept="image/*" 
-                                onChange={(e) => handleFileChange(e, 'tablero')}
-                                className="w-full text-xs text-slate-500 file:mr-3 file:py-2 file:px-3 file:rounded-full file:border-0 file:text-xs file:font-semibold file:bg-slate-100 file:text-slate-600 hover:file:bg-slate-200 cursor-pointer"
-                            />
-                            {fotos.tablero && <div className="mt-2 text-[10px] text-emerald-600">✓ Fotografía cargada correctamente</div>}
+                            <input type="file" accept="image/*" onChange={(e) => handleFileChange(e, 'tablero')} className="w-full text-xs text-slate-500 file:mr-3 file:py-2 file:px-3 file:rounded-full file:border-0 file:text-xs file:font-semibold file:bg-slate-100 file:text-slate-600 hover:file:bg-slate-200 cursor-pointer" />
+                            {fotos.tablero && <div className="mt-2 text-[10px] text-emerald-600">✓ Fotografía cargada</div>}
                         </div>
 
-                        {/* Mensaje de Estado */}
                         {statusMsg.text && (
-                            <div className={`p-3 rounded-lg text-xs font-medium text-center ${
-                                statusMsg.type === 'error' ? 'bg-red-50 text-red-600 border border-red-100' :
-                                statusMsg.type === 'success' ? 'bg-emerald-50 text-emerald-600 border border-emerald-100' :
-                                'bg-blue-50 text-blue-600 border border-blue-100'
-                            }`}>
-                                {statusMsg.text}
-                            </div>
+                            <div className={`p-3 rounded-lg text-xs font-medium text-center ${statusMsg.type === 'error' ? 'bg-red-50 text-red-600' : statusMsg.type === 'success' ? 'bg-emerald-50 text-emerald-600' : 'bg-blue-50 text-blue-600'}`}>{statusMsg.text}</div>
                         )}
 
-                        {/* Botón de Envío */}
-                        <button
-                            type="submit"
-                            disabled={loading}
-                            className="w-full py-2.5 bg-slate-800 hover:bg-slate-900 text-white rounded-lg font-medium text-sm transition duration-150 disabled:opacity-50"
-                        >
-                            {loading ? 'Enviando Registro...' : 'Guardar en Bitácora'}
-                        </button>
+                        <button type="submit" disabled={loading} className="w-full py-2.5 bg-slate-800 hover:bg-slate-900 text-white rounded-lg font-medium text-sm transition disabled:opacity-50">{loading ? 'Procesando...' : 'Guardar en Bitácora'}</button>
                     </form>
+
+                    {/* MODAL: CONSULTA DE EVIDENCIAS HISTÓRICAS */}
+                    {showEvidenciasModal && (
+                        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex justify-center items-center p-4 z-50 overflow-y-auto">
+                            <div className="bg-white rounded-2xl shadow-xl w-full max-w-md max-h-[90vh] overflow-y-auto p-6 space-y-4">
+                                <div className="flex justify-between items-center border-b pb-2">
+                                    <h3 className="text-lg font-medium text-slate-800 font-light">Consulta de Evidencias</h3>
+                                    <button onClick={() => { setShowEvidenciasModal(false); setSelectedObraEvidencia(''); setFichaTecnicaObra(null); setHistorialEvidencias([]); }} className="text-slate-400 hover:text-slate-600 text-xl font-bold">&times;</button>
+                                </div>
+
+                                {/* Selección de Obra */}
+                                <div className="space-y-1">
+                                    <label className="block text-xs font-semibold text-slate-500 uppercase">Seleccione Obra</label>
+                                    <select
+                                        value={selectedObraEvidencia}
+                                        onChange={handleObraEvidenciaSelect}
+                                        className="w-full bg-slate-50 border border-slate-200 rounded-lg py-1.5 px-3 text-sm focus:outline-none"
+                                    >
+                                        <option value="">-- SELECCIONE --</option>
+                                        {obrasDb.map((obra, idx) => (
+                                            <option key={idx} value={obra.nombre_obra}>{obra.nombre_obra}</option>
+                                        ))}
+                                    </select>
+                                </div>
+
+                                {/* 1. Bloque de Texto: Ficha Técnica (Hoja OBRAS) */}
+                                {fichaTecnicaObra && (
+                                    <div className="bg-slate-50 p-4 rounded-xl border border-slate-150 text-xs space-y-1.5">
+                                        <h4 className="font-semibold text-slate-700 border-b pb-1 mb-1.5 uppercase tracking-wide">Ficha Técnica de la Obra</h4>
+                                        <p><span className="text-slate-400 font-medium">NÚMERO OBRA:</span> <strong className="text-slate-600">{fichaTecnicaObra.numero_obra}</strong></p>
+                                        <p><span className="text-slate-400 font-medium">DESCRIPCIÓN:</span> <strong className="text-slate-600">{fichaTecnicaObra.descripcion || 'SIN REGISTRO'}</strong></p>
+                                        <p><span className="text-slate-400 font-medium">UBICACIÓN:</span> <strong className="text-slate-600">{fichaTecnicaObra.calle_obra}, COL. {fichaTecnicaObra.colonia || 'N/A'}</strong></p>
+                                        <p><span className="text-slate-400 font-medium">META:</span> <strong className="text-slate-600">{fichaTecnicaObra.meta || 'N/A'}</strong></p>
+                                        <p><span className="text-slate-400 font-medium">PLAZO DE EJECUCIÓN:</span> <strong className="text-slate-600">{fichaTecnicaObra.fecha_inicio} AL {fichaTecnicaObra.fecha_termino} ({fichaTecnicaObra.dias_plazo} DÍAS)</strong></p>
+                                        <p><span className="text-slate-400 font-medium">SUPERVISOR:</span> <strong className="text-slate-600">{fichaTecnicaObra.supervisor}</strong></p>
+                                        <p><span className="text-slate-400 font-medium">RECURSO APROBADO:</span> <strong className="text-slate-600">${parseFloat(fichaTecnicaObra.costo || 0).toLocaleString()} MXN ({fichaTecnicaObra.origen_recurso})</strong></p>
+                                        <p><span className="text-slate-400 font-medium">GEOLOCALIZACIÓN:</span> <strong className="text-slate-600 font-mono">{fichaTecnicaObra.geolocalizacion}</strong></p>
+                                    </div>
+                                )}
+
+                                {/* 2. Listado Histórico de Fotos (Hoja BITACORA_OBRAS) */}
+                                <div className="space-y-3">
+                                    <h4 className="font-semibold text-xs text-slate-500 uppercase tracking-wide">Historial de Visitas y Fotos</h4>
+                                    
+                                    {loadingEvidencias && (
+                                        <p className="text-xs text-slate-400 text-center py-4 animate-pulse">Cargando registros históricos de fotos...</p>
+                                    )}
+
+                                    {!loadingEvidencias && selectedObraEvidencia && historialEvidencias.length === 0 && (
+                                        <p className="text-xs text-slate-400 text-center py-4">No se encontraron visitas registradas en la bitácora para esta obra.</p>
+                                    )}
+
+                                    {historialEvidencias.map((reg, index) => (
+                                        <div key={index} className="bg-white border rounded-xl p-3.5 space-y-2.5 shadow-sm">
+                                            <div className="flex justify-between items-center text-[11px] border-b pb-1 text-slate-400">
+                                                <span>Fecha: <strong className="text-slate-600">{reg.fecha}</strong></span>
+                                                <span>Sup: <strong className="text-slate-600">{reg.supervisor}</strong></span>
+                                            </div>
+                                            {reg.observaciones && (
+                                                <p className="text-xs text-slate-500 bg-slate-50 p-2 rounded italic">"{reg.observaciones}"</p>
+                                            )}
+                                            {/* Galería de fotos */}
+                                            <div className="grid grid-cols-2 gap-2.5 pt-1">
+                                                <div>
+                                                    <span className="block text-[10px] text-slate-400 font-medium mb-1 text-center">FOTO EVIDENCIA</span>
+                                                    {reg.foto_evidencia ? (
+                                                        <a href={reg.foto_evidencia} target="_blank" rel="noopener noreferrer">
+                                                            <img 
+                                                                src={formatoDriveDirectUrl(reg.foto_evidencia)} 
+                                                                alt="Evidencia" 
+                                                                className="w-full h-24 object-cover rounded-lg border border-slate-100 hover:scale-105 transition"
+                                                                onError={(e) => { e.target.src = "https://placehold.co/150x100?text=Ver+Foto"; }}
+                                                            />
+                                                        </a>
+                                                    ) : (
+                                                        <span className="block text-[10px] text-slate-300 text-center py-6 border border-dashed rounded-lg">Sin Imagen</span>
+                                                    )}
+                                                </div>
+                                                <div>
+                                                    <span className="block text-[10px] text-slate-400 font-medium mb-1 text-center">FOTO TABLERO</span>
+                                                    {reg.foto_tablero ? (
+                                                        <a href={reg.foto_tablero} target="_blank" rel="noopener noreferrer">
+                                                            <img 
+                                                                src={formatoDriveDirectUrl(reg.foto_tablero)} 
+                                                                alt="Tablero" 
+                                                                className="w-full h-24 object-cover rounded-lg border border-slate-100 hover:scale-105 transition"
+                                                                onError={(e) => { e.target.src = "https://placehold.co/150x100?text=Ver+Foto"; }}
+                                                            />
+                                                        </a>
+                                                    ) : (
+                                                        <span className="block text-[10px] text-slate-300 text-center py-6 border border-dashed rounded-lg">Sin Imagen</span>
+                                                    )}
+                                                </div>
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* MODAL: REGISTRO NUEVA OBRA */}
+                    {showModal && (
+                        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex justify-center items-center p-4 z-50 overflow-y-auto">
+                            <div className="bg-white rounded-2xl shadow-xl w-full max-w-md max-h-[90vh] overflow-y-auto p-6 space-y-4">
+                                <div className="flex justify-between items-center border-b pb-2">
+                                    <h3 className="text-lg font-medium text-slate-800">Nueva Obra</h3>
+                                    <button onClick={() => setShowModal(false)} className="text-slate-400 hover:text-slate-600 text-xl font-bold">&times;</button>
+                                </div>
+
+                                <form onSubmit={handleSubmitNuevaObra} className="space-y-3.5">
+                                    <div>
+                                        <label className="block text-xs font-semibold text-slate-500 uppercase">Número Obra</label>
+                                        <input type="text" name="numero_obra" required value={nuevaObra.numero_obra} onChange={handleNuevaObraChange} className="w-full bg-slate-50 border border-slate-200 rounded-lg py-1.5 px-3 text-sm focus:outline-none uppercase-input" placeholder="Ej: K0001"/>
+                                    </div>
+
+                                    <div>
+                                        <label className="block text-xs font-semibold text-slate-500 uppercase">Nombre Obra</label>
+                                        <input type="text" name="nombre_obra" required value={nuevaObra.nombre_obra} onChange={handleNuevaObraChange} className="w-full bg-slate-50 border border-slate-200 rounded-lg py-1.5 px-3 text-sm focus:outline-none uppercase-input" placeholder="Nombre descriptivo"/>
+                                    </div>
+
+                                    <div>
+                                        <label className="block text-xs font-semibold text-slate-500 uppercase">Descripción</label>
+                                        <textarea name="descripcion" required rows="2" value={nuevaObra.descripcion} onChange={handleNuevaObraChange} className="w-full bg-slate-50 border border-slate-200 rounded-lg py-1.5 px-3 text-sm focus:outline-none uppercase-input"></textarea>
+                                    </div>
+
+                                    <div className="grid grid-cols-2 gap-2">
+                                        <div>
+                                            <label className="block text-xs font-semibold text-slate-500 uppercase">Calle</label>
+                                            <input type="text" name="calle_obra" required value={nuevaObra.calle_obra} onChange={handleNuevaObraChange} className="w-full bg-slate-50 border border-slate-200 rounded-lg py-1.5 px-3 text-sm focus:outline-none uppercase-input"/>
+                                        </div>
+                                        <div>
+                                            <label className="block text-xs font-semibold text-slate-500 uppercase">Colonia</label>
+                                            <input type="text" name="colonia" required value={nuevaObra.colonia} onChange={handleNuevaObraChange} className="w-full bg-slate-50 border border-slate-200 rounded-lg py-1.5 px-3 text-sm focus:outline-none uppercase-input"/>
+                                        </div>
+                                    </div>
+
+                                    <div>
+                                        <label className="block text-xs font-semibold text-slate-500 uppercase">Meta</label>
+                                        <input type="text" name="meta" required value={nuevaObra.meta} onChange={handleNuevaObraChange} className="w-full bg-slate-50 border border-slate-200 rounded-lg py-1.5 px-3 text-sm focus:outline-none uppercase-input" placeholder="Ej: 500 MTS2"/>
+                                    </div>
+
+                                    <div className="grid grid-cols-2 gap-2">
+                                        <div>
+                                            <label className="block text-xs font-semibold text-slate-500 uppercase">Fecha Inicio</label>
+                                            <input type="date" name="fecha_inicio" required value={nuevaObra.fecha_inicio} onChange={handleNuevaObraChange} className="w-full bg-slate-50 border border-slate-200 rounded-lg py-1.5 px-3 text-sm focus:outline-none"/>
+                                        </div>
+                                        <div>
+                                            <label className="block text-xs font-semibold text-slate-500 uppercase">Fecha Término</label>
+                                            <input type="date" name="fecha_termino" required value={nuevaObra.fecha_termino} onChange={handleNuevaObraChange} className="w-full bg-slate-50 border border-slate-200 rounded-lg py-1.5 px-3 text-sm focus:outline-none"/>
+                                        </div>
+                                    </div>
+
+                                    <div>
+                                        <label className="block text-xs font-semibold text-slate-500 uppercase">Días Plazo (Autocalculado)</label>
+                                        <input type="number" disabled value={calcularDiasPlazo()} className="w-full bg-slate-100 border border-slate-200 rounded-lg py-1.5 px-3 text-sm text-slate-500 focus:outline-none font-medium" />
+                                    </div>
+
+                                    <div>
+                                        <label className="block text-xs font-semibold text-slate-500 uppercase">Geolocalización (Click en mapa)</label>
+                                        <input type="text" name="geolocalizacion" required value={nuevaObra.geolocalizacion} onChange={handleNuevaObraChange} className="w-full bg-slate-100 border border-slate-200 rounded-lg py-1.5 px-3 text-sm focus:outline-none text-slate-600 font-mono" placeholder="Lat, Lng del mapa"/>
+                                    </div>
+
+                                    <div>
+                                        <label className="block text-xs font-semibold text-slate-500 uppercase">Supervisor</label>
+                                        <select name="supervisor" value={nuevaObra.supervisor} onChange={handleNuevaObraChange} className="w-full bg-slate-50 border border-slate-200 rounded-lg py-1.5 px-3 text-sm focus:outline-none">
+                                            {supervisoresDb.map((sup, sIdx) => (
+                                                <option key={sIdx} value={sup}>{sup}</option>
+                                            ))}
+                                            <option value="OTRO">+ Agregar nuevo supervisor</option>
+                                        </select>
+                                    </div>
+
+                                    {nuevaObra.supervisor === "OTRO" && (
+                                        <div>
+                                            <label className="block text-xs font-semibold text-slate-500 uppercase">Nuevo Supervisor (Nombre)</label>
+                                            <input type="text" name="nuevo_supervisor" required value={nuevaObra.nuevo_supervisor} onChange={handleNuevaObraChange} className="w-full bg-slate-50 border border-slate-200 rounded-lg py-1.5 px-3 text-sm focus:outline-none uppercase-input" placeholder="Ej: CARLOS GOMEZ"/>
+                                        </div>
+                                    )}
+
+                                    <div className="grid grid-cols-2 gap-2">
+                                        <div>
+                                            <label className="block text-xs font-semibold text-slate-500 uppercase">Costo ($)</label>
+                                            <input type="number" step="0.01" name="costo" required value={nuevaObra.costo} onChange={handleNuevaObraChange} className="w-full bg-slate-50 border border-slate-200 rounded-lg py-1.5 px-3 text-sm focus:outline-none"/>
+                                        </div>
+                                        <div>
+                                            <label className="block text-xs font-semibold text-slate-500 uppercase">Origen Recurso</label>
+                                            <input type="text" name="origen_recurso" required value={nuevaObra.origen_recurso} onChange={handleNuevaObraChange} className="w-full bg-slate-50 border border-slate-200 rounded-lg py-1.5 px-3 text-sm focus:outline-none uppercase-input"/>
+                                        </div>
+                                    </div>
+
+                                    {modalMsg.text && (
+                                        <div className={`p-2.5 rounded-lg text-xs font-medium text-center ${modalMsg.type === 'error' ? 'bg-red-50 text-red-600' : modalMsg.type === 'success' ? 'bg-emerald-50 text-emerald-600' : 'bg-blue-50 text-blue-600'}`}>{modalMsg.text}</div>
+                                    )}
+
+                                    <div className="flex gap-2 pt-2 border-t">
+                                        <button type="button" onClick={() => setShowModal(false)} className="w-1/2 py-2 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-lg text-sm font-medium transition">Cancelar</button>
+                                        <button type="submit" disabled={loadingModal} className="w-1/2 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-sm font-medium transition">Guardar Obra</button>
+                                    </div>
+                                </form>
+                            </div>
+                        </div>
+                    )}
                 </div>
             );
         }
