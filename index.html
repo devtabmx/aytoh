@@ -54,8 +54,7 @@
         const { useState, useEffect, useRef } = React;
 
         // URL del Web App de Google Apps Script (Configurada desde PROYECTO_OBRAS.md)
-        const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbxp9HvNNlegXeLVowieVkLjUXq9kRqCIEZ4I4PO7U2CzIQG5IxIFwWRLFZ5z8ploU783Q/exec";
-
+        const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbw9lctUemALnHiuSrADWKQvrkIRJYRHU4BM2AUlRGnkRNq_VeWUwKjJNEGNNB3W_cFeyg/exec"
         // Coordenadas fijas de origen: Ayuntamiento de Huimanguillo, Tabasco
         const ORIGEN_COORDS = [17.83063, -93.38808];
 
@@ -115,20 +114,31 @@
                 return url;
             };
 
-            // Cargar Obras y Supervisores al Iniciar
+            // Cargar Obras y Supervisores al Iniciar con diagnóstico detallado
             const cargarCatalogoObras = async () => {
-                if (WEB_APP_URL === "TU_URL_DE_APPLICATIONS_SCRIPT_AQUI") return;
+                if (!WEB_APP_URL || WEB_APP_URL === "TU_URL_DE_APPLICATIONS_SCRIPT_AQUI") return;
                 try {
                     const response = await fetch(`${WEB_APP_URL}?action=get_obras`);
                     const data = await response.json();
+                    console.log("Diagnóstico API Google Apps Script:", data);
+
                     if (data.status === "SUCCESS") {
                         setObrasDb(data.obras || []);
                         if (data.supervisores && data.supervisores.length > 0) {
                             setSupervisoresDb(data.supervisores);
                         }
+                        if ((data.obras || []).length === 0) {
+                            const aviso = (data.debug && data.debug.motivo) ? data.debug.motivo : "La hoja OBRAS no contiene registros.";
+                            setStatusMsg({ type: 'error', text: aviso });
+                        }
+                    } else {
+                        const errMsg = (data.debug && data.debug.motivo) ? data.debug.motivo : (data.message || "Error al leer la hoja OBRAS.");
+                        console.error("Diagnóstico detallado de error:", data.debug);
+                        setStatusMsg({ type: 'error', text: errMsg });
                     }
                 } catch (error) {
                     console.error("Error cargando catálogos de obras", error);
+                    setStatusMsg({ type: 'error', text: "Error de red/API: " + error.message });
                 }
             };
 
@@ -250,9 +260,9 @@
                     }));
 
                     if (obraEncontrada.geolocalizacion) {
-                        const coords = obraEncontrada.geolocalizacion.split(',').map(Number);
-                        if (coords.length === 2 && !isNaN(coords[0]) && !isNaN(coords[1])) {
-                            mapRef.current.setView(coords, 14);
+                        const coords = obraEncontrada.geolocalizacion.split(',').map(s => parseFloat(String(s).trim()));
+                        if (coords.length >= 2 && !isNaN(coords[0]) && !isNaN(coords[1])) {
+                            mapRef.current.setView([coords[0], coords[1]], 14);
                             actualizarRutaYDistancia(coords[0], coords[1]);
                         }
                     }
