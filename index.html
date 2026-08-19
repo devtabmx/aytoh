@@ -54,9 +54,36 @@
         const { useState, useEffect, useRef } = React;
 
         // URL del Web App de Google Apps Script (Configurada desde PROYECTO_OBRAS.md)
-        const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbyUW6TfwvNMiXVFNoemQqx_6_XrF1iITH8qUHyUMWYEVCkiyGkm5kOm0zyjVIbST9XdwQ/exec"
+        const WEB_APP_URL = "https://script.google.com/macros/s/AKfycby1qNcyFepoETg97St-FbsTOk7ExqnSbF5bBVJRG-MRf3t-IboNVLrSB4HuRPnMURwcmw/exec"
         // Coordenadas fijas de origen: Ayuntamiento de Huimanguillo, Tabasco
         const ORIGEN_COORDS = [17.83063, -93.38808];
+
+        // Función auxiliar JSONP para realizar peticiones GET evadiendo bloqueos de CORS en modo file:// (offline/campo)
+        const fetchJsonp = (url, prefix = "jsonp") => {
+            return new Promise((resolve, reject) => {
+                const callbackName = `${prefix}_${Date.now()}_${Math.floor(Math.random() * 1000000)}`;
+                const script = document.createElement("script");
+
+                window[callbackName] = (data) => {
+                    cleanup();
+                    resolve(data);
+                };
+
+                script.onerror = () => {
+                    cleanup();
+                    reject(new Error("No se pudo conectar al servidor de Google Apps Script."));
+                };
+
+                const cleanup = () => {
+                    delete window[callbackName];
+                    script.remove();
+                };
+
+                const sep = url.indexOf("?") !== -1 ? "&" : "?";
+                script.src = `${url}${sep}callback=${callbackName}`;
+                document.body.appendChild(script);
+            });
+        };
 
         function App() {
             // Catálogos cargados de Google Sheets
@@ -125,8 +152,7 @@
             const cargarCatalogoObras = async () => {
                 if (!WEB_APP_URL || WEB_APP_URL === "TU_URL_DE_APPLICATIONS_SCRIPT_AQUI") return;
                 try {
-                    const response = await fetch(`${WEB_APP_URL}?action=get_obras`);
-                    const data = await response.json();
+                    const data = await fetchJsonp(`${WEB_APP_URL}?action=get_obras`, "obras");
                     console.log("Diagnóstico API Google Apps Script:", data);
 
                     if (data.status === "SUCCESS") {
@@ -171,8 +197,7 @@
                 // 2. Consultar registros históricos de bitácora por API
                 setLoadingEvidencias(true);
                 try {
-                    const response = await fetch(`${WEB_APP_URL}?action=get_evidencias&obra=${encodeURIComponent(nombreObra)}`);
-                    const data = await response.json();
+                    const data = await fetchJsonp(`${WEB_APP_URL}?action=get_evidencias&obra=${encodeURIComponent(nombreObra)}`, "evidencias");
                     if (data.status === "SUCCESS") {
                         setHistorialEvidencias(data.registros || []);
                     }
