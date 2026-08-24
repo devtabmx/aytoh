@@ -32,8 +32,9 @@
     <!-- Leaflet para el Mapa -->
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.7.1/dist/leaflet.css" />
     <script src="https://unpkg.com/leaflet@1.7.1/dist/leaflet.js"></script>
-    <!-- SheetJS para exportar a Excel -->
-    <script src="https://unpkg.com/xlsx/dist/xlsx.full.min.js"></script>
+    <!-- ExcelJS y FileSaver para exportar a Excel -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.3.0/exceljs.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/FileSaver.js/2.0.5/FileSaver.min.js"></script>
 
     <style>
         .uppercase-input {
@@ -56,7 +57,7 @@
         const { useState, useEffect, useRef } = React;
 
         // URL del Web App de Google Apps Script (Configurada desde PROYECTO_OBRAS.md)
-        const WEB_APP_URL = "https://script.google.com/macros/s/AKfycby5x8KsFTw9VyE09sV0gmGAOIKFvcqG4KWFf473Mdrh_m0WhPWRlUmKC2e-KcKwxpVxtQ/exec"
+        const WEB_APP_URL = "https://script.google.com/macros/s/AKfycby0Z6AzNNIpHybmxmpu9fP5UVxpRxW2Lsj_uBsRwfRfGhi9ebq3L1-B9XN_dKPVzU7N_Q/exec"
         // Coordenadas fijas de origen: Ayuntamiento de Huimanguillo, Tabasco
         const ORIGEN_COORDS = [17.83063, -93.38808];
 
@@ -97,9 +98,13 @@
                 nombre_obra: '',
                 numero_obra: '',
                 supervisor: '',
+                supervisor_obra_publicas: '',
                 observaciones: '',
                 kilometraje: '',
                 precio_combustible: '',
+                porcentaje_avance: '',
+                comentarios_avances: '',
+                pendientes: ''
             });
 
             // Formulario de Nueva Obra (Modal)
@@ -290,7 +295,8 @@
                         ...prev,
                         nombre_obra: nombreSel,
                         numero_obra: obraEncontrada.numero_obra,
-                        supervisor: obraEncontrada.supervisor
+                        supervisor: obraEncontrada.supervisor,
+                        supervisor_obra_publicas: obraEncontrada.supervisor_obra_publicas || obraEncontrada.SUPERVISOR_OBRA_PUBLICAS || ''
                     }));
 
                     if (obraEncontrada.geolocalizacion) {
@@ -301,7 +307,7 @@
                         }
                     }
                 } else {
-                    setFormData(prev => ({ ...prev, nombre_obra: nombreSel, numero_obra: '', supervisor: '' }));
+                    setFormData(prev => ({ ...prev, nombre_obra: nombreSel, numero_obra: '', supervisor: '', supervisor_obra_publicas: '' }));
                 }
             };
 
@@ -432,24 +438,92 @@
 
             const handleDescargarExcel = async () => {
                 setLoadingModal(true);
-                setModalMsg({ type: 'info', text: 'Preparando descarga de Excel...' });
+                setModalMsg({ type: 'info', text: 'Generando archivo de Excel... (esto puede tomar un momento por las imágenes)' });
                 try {
                     const data = await fetchJsonp(`${WEB_APP_URL}?action=get_datos_descarga`, "descarga");
-                    if (data.status === "SUCCESS" && data.datos && data.datos.length > 0) {
-                        const ws = XLSX.utils.json_to_sheet(data.datos);
-                        const wb = XLSX.utils.book_new();
-                        XLSX.utils.book_append_sheet(wb, ws, "Bitacora_Completa");
+                    if (data.status === "SUCCESS" && data.datos && data.datos.bitacora) {
+                        const { bitacora, fotos } = data.datos;
+
+                        // Crear workbook de ExcelJS
+                        const workbook = new ExcelJS.Workbook();
+                        workbook.creator = 'App Obras';
+                        workbook.created = new Date();
+
+                        // --- HOJA BITÁCORA ---
+                        const wsBitacora = workbook.addWorksheet('Bitácora');
+                        if (bitacora.length > 0) {
+                            const cabecerasBit = Object.keys(bitacora[0]);
+                            wsBitacora.addRow(cabecerasBit);
+                            wsBitacora.getRow(1).font = { bold: true };
+                            bitacora.forEach(row => wsBitacora.addRow(Object.values(row)));
+                        }
+
+                        // --- HOJA BITÁCORA FOTOS ---
+                        const wsFotos = workbook.addWorksheet('Bitácora_fotos');
+                        if (fotos.length > 0) {
+                            const cabecerasFot = Object.keys(fotos[0]);
+                            wsFotos.addRow(cabecerasFot);
+                            wsFotos.getRow(1).font = { bold: true };
+
+                            // Ajustar anchos y altos
+                            // "FOTO" es la columna 7 (G) - Índice 6
+                            wsFotos.getColumn('G').width = 15; // aprox 80px
+
+                            for (let i = 0; i < fotos.length; i++) {
+                                const rowData = fotos[i];
+                                const rowIndex = i + 2; // Fila real en excel
+
+                                // Crear fila con celda FOTO vacía para que no aparezca la URL escrita
+                                const rowValues = [
+                                    rowData["BITACORA_FECHA"] || "",
+                                    rowData["BITACORA_DÍA"] || "",
+                                    rowData["BITACORA_SEMANA"] || "",
+                                    rowData["BITACORA_MES"] || "",
+                                    rowData["BITACORA_NÚMERO OBRA"] || "",
+                                    rowData["BITACORA_NOMBRE DE LA OBRA"] || "",
+                                    "", // FOTO vacía (Columna G)
+                                    rowData["TIPO"] || ""
+                                ];
+
+                                const row = wsFotos.addRow(rowValues);
+                                row.height = 45; // aprox 60px
+
+                                const fotoUrl = rowData["FOTO"];
+                                let directUrl = null;
+                                if (fotoUrl && fotoUrl.includes('drive.google.com/file/d/')) {
+                                    const matchId = fotoUrl.match(/\/d\/([a-zA-Z0-9_-]+)/);
+                                    if (matchId && matchId[1]) {
+                                        directUrl = `https://lh3.googleusercontent.com/d/${matchId[1]}`;
+                                    }
+                                } else if (fotoUrl && fotoUrl.includes('lh3.googleusercontent.com')) {
+                                    directUrl = fotoUrl;
+                                }
+
+                                if (directUrl) {
+                                    try {
+                                        const response = await fetch(directUrl);
+                                        const arrayBuffer = await response.arrayBuffer();
+                                        const imageId = workbook.addImage({
+                                            buffer: arrayBuffer,
+                                            extension: 'jpeg',
+                                        });
+                                        wsFotos.addImage(imageId, {
+                                            tl: { col: 6, row: rowIndex - 1 }, // Col G, Fila i+1 (0-indexed)
+                                            ext: { width: 80, height: 60 }
+                                        });
+                                    } catch (e) {
+                                        console.warn("Error cargando imagen para excel:", directUrl, e);
+                                    }
+                                }
+                            }
+                        }
+
+                        // Generar y descargar archivo
+                        const buffer = await workbook.xlsx.writeBuffer();
+                        const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
                         const fechaExport = new Date().toISOString().split('T')[0];
-                        const wbout = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
-                        const blob = new Blob([wbout], { type: 'application/octet-stream' });
-                        const url = URL.createObjectURL(blob);
-                        const a = document.createElement("a");
-                        a.href = url;
-                        a.download = `Bitacora_Obras_${fechaExport}.xlsx`;
-                        document.body.appendChild(a);
-                        a.click();
-                        document.body.removeChild(a);
-                        URL.revokeObjectURL(url);
+                        saveAs(blob, `Bitacora_Obras_${fechaExport}.xlsx`);
+
                         setModalMsg({ type: 'success', text: '¡Descarga completada!' });
                     } else {
                         setModalMsg({ type: 'error', text: 'No hay datos para descargar.' });
@@ -458,8 +532,10 @@
                     console.error("Error al descargar Excel", error);
                     setModalMsg({ type: 'error', text: 'Error al generar el Excel.' });
                 } finally {
-                    setTimeout(() => setModalMsg({ type: '', text: '' }), 3000);
-                    setLoadingModal(false);
+                    setTimeout(() => {
+                        setModalMsg({ type: '', text: '' });
+                        setLoadingModal(false);
+                    }, 2000);
                 }
             };
 
@@ -470,6 +546,10 @@
 
             const handleSubmit = async (e) => {
                 e.preventDefault();
+                if (!formData.precio_combustible) {
+                    setStatusMsg({ type: 'error', text: 'Debe capturar el Precio Litro ($).' });
+                    return;
+                }
                 if (fotosEvidencia.length === 0 || fotosTablero.length === 0) {
                     setStatusMsg({ type: 'error', text: 'Debes capturar al menos 1 fotografía de evidencia y 1 de tablero.' });
                     return;
@@ -498,6 +578,9 @@
                     costo_aprox: costoAprox,
                     distancia: mapSelection.distancia,
                     tiempo_traslado: mapSelection.tiempo,
+                    porcentaje_avance: formData.porcentaje_avance,
+                    comentarios_avances: formData.comentarios_avances.toUpperCase(),
+                    pendientes: formData.pendientes.toUpperCase(),
                     fotos_evidencia_base64: fotosEvidencia.map(f => f.split(',')[1]),
                     fotos_tablero_base64: fotosTablero.map(f => f.split(',')[1]),
                     foto_evidencia_base64: fotosEvidencia[0].split(',')[1],
@@ -517,8 +600,8 @@
                     if (resJson.status === "SUCCESS") {
                         setStatusMsg({ type: 'success', text: `¡Bitácora guardada con éxito! (${fotosEvidencia.length} evidencias, ${fotosTablero.length} tablero)` });
                         setFormData({
-                            nombre_obra: '', numero_obra: '', supervisor: '', observaciones: '',
-                            kilometraje: '', precio_combustible: '',
+                            nombre_obra: '', numero_obra: '', supervisor: '', supervisor_obra_publicas: '', observaciones: '',
+                            kilometraje: '', precio_combustible: '', porcentaje_avance: '', comentarios_avances: '', pendientes: ''
                         });
                         setFotosEvidencia([]);
                         setFotosTablero([]);
@@ -607,6 +690,10 @@
                                 <label className="block text-xs font-semibold text-slate-500 uppercase mb-1">Supervisor</label>
                                 <input type="text" disabled value={formData.supervisor} className="w-full bg-slate-100 border border-slate-200 rounded-lg py-2 px-3 text-sm text-slate-500 focus:outline-none" placeholder="Automático" />
                             </div>
+                            <div className="col-span-2">
+                                <label className="block text-xs font-semibold text-slate-500 uppercase mb-1">Supervisor Obras Públicas</label>
+                                <input type="text" disabled value={formData.supervisor_obra_publicas} className="w-full bg-slate-100 border border-slate-200 rounded-lg py-2 px-3 text-sm text-slate-500 focus:outline-none" placeholder="Automático" />
+                            </div>
                         </div>
 
                         {/* Mapa Geolocalización */}
@@ -686,7 +773,23 @@
                         {/* Observaciones */}
                         <div>
                             <label className="block text-xs font-semibold text-slate-500 uppercase mb-1">Observaciones</label>
-                            <textarea name="observaciones" rows="2" value={formData.observaciones} onChange={handleInputChange} className="w-full bg-slate-50 border border-slate-200 rounded-lg py-2 px-3 text-sm focus:outline-none focus:border-slate-300 uppercase-input" placeholder="OBSERVACIONES DE CAMPO..."></textarea>
+                            <textarea name="observaciones" rows="2" value={formData.observaciones} onChange={handleInputChange} required className="w-full bg-slate-50 border border-slate-200 rounded-lg py-2 px-3 text-sm focus:outline-none focus:border-slate-300 uppercase-input" placeholder="OBSERVACIONES DE CAMPO..."></textarea>
+                        </div>
+
+                        {/* Avances */}
+                        <div className="space-y-3">
+                            <div>
+                                <label className="block text-xs font-semibold text-slate-500 uppercase mb-1">% de Avance</label>
+                                <input type="number" step="0.1" name="porcentaje_avance" value={formData.porcentaje_avance} onChange={handleInputChange} required className="w-full bg-slate-50 border border-slate-200 rounded-lg py-2 px-3 text-sm focus:outline-none focus:border-slate-300" placeholder="0 - 100" />
+                            </div>
+                            <div>
+                                <label className="block text-xs font-semibold text-slate-500 uppercase mb-1">Comentario de Avance</label>
+                                <textarea name="comentarios_avances" rows="2" value={formData.comentarios_avances} onChange={handleInputChange} required className="w-full bg-slate-50 border border-slate-200 rounded-lg py-2 px-3 text-sm focus:outline-none focus:border-slate-300 uppercase-input" placeholder="DETALLES DEL AVANCE..."></textarea>
+                            </div>
+                            <div>
+                                <label className="block text-xs font-semibold text-slate-500 uppercase mb-1">Avances Pendientes</label>
+                                <textarea name="pendientes" rows="2" value={formData.pendientes} onChange={handleInputChange} required className="w-full bg-slate-50 border border-slate-200 rounded-lg py-2 px-3 text-sm focus:outline-none focus:border-slate-300 uppercase-input" placeholder="PENDIENTES..."></textarea>
+                            </div>
                         </div>
 
                         {/* KMs y Combustible */}
@@ -846,6 +949,24 @@
                                                 )}
                                                 {reg.observaciones && (
                                                     <p className="text-xs text-slate-600 bg-slate-50 p-2 rounded italic border border-slate-100">"{reg.observaciones}"</p>
+                                                )}
+
+                                                {/* Datos de Avance de Obra */}
+                                                {(reg.porcentaje_avance || reg.comentarios_avances || reg.pendientes) && (
+                                                    <div className="bg-blue-50/50 p-2.5 rounded-lg border border-blue-100 text-xs space-y-1.5 mt-2">
+                                                        {reg.porcentaje_avance && (
+                                                            <div className="font-semibold text-blue-800 flex justify-between items-center border-b border-blue-200 pb-1">
+                                                                <span className="uppercase tracking-wide text-[10px]">Avance Registrado</span>
+                                                                <span className="text-sm">{reg.porcentaje_avance}%</span>
+                                                            </div>
+                                                        )}
+                                                        {reg.comentarios_avances && (
+                                                            <p className="text-blue-700 leading-relaxed"><span className="font-medium opacity-80">Comentarios:</span> {reg.comentarios_avances}</p>
+                                                        )}
+                                                        {reg.pendientes && (
+                                                            <p className="text-blue-700/80 leading-relaxed"><span className="font-medium">Pendientes:</span> {reg.pendientes}</p>
+                                                        )}
+                                                    </div>
                                                 )}
 
                                                 {/* Galería de Fotos de Evidencia */}
