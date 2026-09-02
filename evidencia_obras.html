@@ -1,0 +1,1118 @@
+<!DOCTYPE html>
+<html lang="es">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Bitácora de Obras - Móvil</title>
+
+    <!-- Meta tags para App Móvil (PWA/iOS) -->
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="default">
+    <meta name="theme-color" content="#f8fafc">
+
+    <!-- Silenciar avisos informativos de CDN en consola -->
+    <script>
+        (function () {
+            const origWarn = console.warn;
+            console.warn = function (...args) {
+                if (args[0] && typeof args[0] === 'string' && (args[0].includes('cdn.tailwindcss.com') || args[0].includes('Babel transformer'))) return;
+                origWarn.apply(console, args);
+            };
+        })();
+    </script>
+
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- React y ReactDOM -->
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+    <!-- Babel para compilar JSX -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <!-- Leaflet para el Mapa -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.7.1/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.7.1/dist/leaflet.js"></script>
+    <!-- ExcelJS y FileSaver para exportar a Excel -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.3.0/exceljs.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/FileSaver.js/2.0.5/FileSaver.min.js"></script>
+
+    <style>
+        .uppercase-input {
+            text-transform: uppercase;
+        }
+
+        #map {
+            height: 250px;
+            border-radius: 0.5rem;
+            z-index: 10;
+        }
+    </style>
+</head>
+
+<body class="bg-slate-50 text-slate-700 min-h-screen pb-12">
+
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef } = React;
+
+        // URL del Web App de Google Apps Script (Configurada desde PROYECTO_OBRAS.md)
+        const WEB_APP_URL = "https://script.google.com/macros/s/AKfycby0Z6AzNNIpHybmxmpu9fP5UVxpRxW2Lsj_uBsRwfRfGhi9ebq3L1-B9XN_dKPVzU7N_Q/exec"
+        // Coordenadas fijas de origen: Ayuntamiento de Huimanguillo, Tabasco
+        const ORIGEN_COORDS = [17.83063, -93.38808];
+
+        // Función auxiliar JSONP para realizar peticiones GET evadiendo bloqueos de CORS en modo file:// (offline/campo)
+        const fetchJsonp = (url, prefix = "jsonp") => {
+            return new Promise((resolve, reject) => {
+                const callbackName = `${prefix}_${Date.now()}_${Math.floor(Math.random() * 1000000)}`;
+                const script = document.createElement("script");
+
+                window[callbackName] = (data) => {
+                    cleanup();
+                    resolve(data);
+                };
+
+                script.onerror = () => {
+                    cleanup();
+                    reject(new Error("No se pudo conectar al servidor de Google Apps Script."));
+                };
+
+                const cleanup = () => {
+                    delete window[callbackName];
+                    script.remove();
+                };
+
+                const sep = url.indexOf("?") !== -1 ? "&" : "?";
+                script.src = `${url}${sep}callback=${callbackName}`;
+                document.body.appendChild(script);
+            });
+        };
+
+        function App() {
+            // Catálogos cargados de Google Sheets
+            const [obrasDb, setObrasDb] = useState([]);
+            const [supervisoresDb, setSupervisoresDb] = useState(['CARLOS', 'JUAN', 'ALBERTO']);
+
+            // Formulario principal (Bitácora)
+            const [formData, setFormData] = useState({
+                nombre_obra: '',
+                numero_obra: '',
+                supervisor: '',
+                supervisor_obra_publicas: '',
+                kilometraje: '',
+                precio_combustible: ''
+            });
+
+            // Formulario de Nueva Obra (Modal)
+            const [showModal, setShowModal] = useState(false);
+            const [nuevaObra, setNuevaObra] = useState({
+                numero_obra: '', nombre_obra: '', descripcion: '', calle_obra: '',
+                meta: '', fecha_inicio: '', fecha_termino: '', colonia: '',
+                geolocalizacion: '', supervisor: 'CARLOS', nuevo_supervisor: '',
+                costo: '', origen_recurso: ''
+            });
+
+            // Modal de Consulta de Evidencias Históricas
+            const [showEvidenciasModal, setShowEvidenciasModal] = useState(false);
+            const [selectedObraEvidencia, setSelectedObraEvidencia] = useState('');
+            const [fichaTecnicaObra, setFichaTecnicaObra] = useState(null);
+            const [historialEvidencias, setHistorialEvidencias] = useState([]);
+            const [loadingEvidencias, setLoadingEvidencias] = useState(false);
+
+            const [mapSelection, setMapSelection] = useState({
+                distancia: '0.00 km',
+                tiempo: '0 min',
+                coordsDestino: null
+            });
+
+            const [fotosEvidencia, setFotosEvidencia] = useState([]);
+            const [fotosTablero, setFotosTablero] = useState([]);
+            const [loading, setLoading] = useState(false);
+            const [loadingModal, setLoadingModal] = useState(false);
+            const [statusMsg, setStatusMsg] = useState({ type: '', text: '' });
+            const [modalMsg, setModalMsg] = useState({ type: '', text: '' });
+
+            const mapRef = useRef(null);
+            const markerRef = useRef(null);
+
+            // Convierte una o múltiples URLs de Google Drive a URLs directas visibles para <img>
+            const extraerUrlsDrive = (cadenaUrls) => {
+                if (!cadenaUrls) return [];
+                const lista = String(cadenaUrls).split(/[\n,;]+/).map(u => u.trim()).filter(Boolean);
+                return lista.map(url => {
+                    const match = url.match(/\/file\/d\/([^\/\?]+)/) || url.match(/id=([^&]+)/);
+                    const fileId = match ? match[1] : null;
+                    return {
+                        original: url,
+                        fileId: fileId,
+                        direct: fileId ? `https://lh3.googleusercontent.com/d/${fileId}` : url,
+                        fallback: fileId ? `https://drive.google.com/thumbnail?id=${fileId}&sz=w1000` : url
+                    };
+                });
+            };
+
+            // Cargar Obras y Supervisores al Iniciar con diagnóstico detallado
+            const cargarCatalogoObras = async () => {
+                if (!WEB_APP_URL || WEB_APP_URL === "TU_URL_DE_APPLICATIONS_SCRIPT_AQUI") return;
+                try {
+                    const data = await fetchJsonp(`${WEB_APP_URL}?action=get_obras`, "obras");
+                    console.log("Diagnóstico API Google Apps Script:", data);
+
+                    if (data.status === "SUCCESS") {
+                        setObrasDb(data.obras || []);
+                        if (data.supervisores && data.supervisores.length > 0) {
+                            setSupervisoresDb(data.supervisores);
+                        }
+                        if ((data.obras || []).length === 0) {
+                            const aviso = (data.debug && data.debug.motivo) ? data.debug.motivo : "La hoja OBRAS no contiene registros.";
+                            setStatusMsg({ type: 'error', text: aviso });
+                        }
+                    } else {
+                        const errMsg = (data.debug && data.debug.motivo) ? data.debug.motivo : (data.message || "Error al leer la hoja OBRAS.");
+                        console.error("Diagnóstico detallado de error:", data.debug);
+                        setStatusMsg({ type: 'error', text: errMsg });
+                    }
+                } catch (error) {
+                    console.error("Error cargando catálogos de obras", error);
+                    setStatusMsg({ type: 'error', text: "Error de red/API: " + error.message });
+                }
+            };
+
+            useEffect(() => {
+                cargarCatalogoObras();
+            }, []);
+
+            // Handler para cargar ficha técnica e historial de evidencias de una obra específica
+            const handleObraEvidenciaSelect = async (e) => {
+                const nombreObra = e.target.value;
+                setSelectedObraEvidencia(nombreObra);
+                setFichaTecnicaObra(null);
+                setHistorialEvidencias([]);
+
+                if (!nombreObra) return;
+
+                // 1. Cargar datos técnicos locales de la obra seleccionada
+                const obraDetalle = obrasDb.find(o => o.nombre_obra === nombreObra);
+                if (obraDetalle) {
+                    setFichaTecnicaObra(obraDetalle);
+                }
+
+                // 2. Consultar registros históricos de bitácora por API
+                setLoadingEvidencias(true);
+                try {
+                    const data = await fetchJsonp(`${WEB_APP_URL}?action=get_evidencias&obra=${encodeURIComponent(nombreObra)}`, "evidencias");
+                    if (data.status === "SUCCESS") {
+                        setHistorialEvidencias(data.registros || []);
+                    }
+                } catch (error) {
+                    console.error("Error al consultar evidencias históricas", error);
+                } finally {
+                    setLoadingEvidencias(false);
+                }
+            };
+
+            // Cálculo de DÍAS_PLAZO
+            const calcularDiasPlazo = () => {
+                if (!nuevaObra.fecha_inicio || !nuevaObra.fecha_termino) return 0;
+                const inicio = new Date(nuevaObra.fecha_inicio);
+                const termino = new Date(nuevaObra.fecha_termino);
+                const diffTime = termino - inicio;
+                if (diffTime < 0) return 0;
+                return Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+            };
+
+            const handleNuevaObraChange = (e) => {
+                const { name, value } = e.target;
+                setNuevaObra(prev => ({ ...prev, [name]: value }));
+            };
+
+            // Enviar Nueva Obra a Google Sheets
+            const handleSubmitNuevaObra = async (e) => {
+                e.preventDefault();
+                setLoadingModal(true);
+                setModalMsg({ type: 'info', text: 'Guardando obra...' });
+
+                const supervisorFinal = nuevaObra.supervisor === "OTRO"
+                    ? nuevaObra.nuevo_supervisor.toUpperCase()
+                    : nuevaObra.supervisor.toUpperCase();
+
+                // Ficha extendida que empata con las columnas especificadas para la hoja OBRAS
+                const payload = {
+                    action: "save_obra",
+                    numero_obra: nuevaObra.numero_obra.toUpperCase(),
+                    nombre_obra: nuevaObra.nombre_obra.toUpperCase(),
+                    descripcion: nuevaObra.descripcion.toUpperCase(),
+                    calle_obra: nuevaObra.calle_obra.toUpperCase(),
+                    meta: nuevaObra.meta.toUpperCase(),
+                    fecha_inicio: nuevaObra.fecha_inicio,
+                    fecha_termino: nuevaObra.fecha_termino,
+                    dias_plazo: calcularDiasPlazo(),
+                    colonia: nuevaObra.colonia.toUpperCase(),
+                    geolocalizacion: nuevaObra.geolocalizacion,
+                    supervisor: supervisorFinal,
+                    costo: nuevaObra.costo,
+                    origen_recurso: nuevaObra.origen_recurso.toUpperCase()
+                };
+
+                try {
+                    await fetch(WEB_APP_URL, {
+                        method: 'POST',
+                        mode: 'no-cors',
+                        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+                        body: JSON.stringify(payload)
+                    });
+
+                    setModalMsg({ type: 'success', text: 'Obra guardada exitosamente.' });
+                    setTimeout(() => {
+                        setShowModal(false);
+                        setNuevaObra({
+                            numero_obra: '', nombre_obra: '', descripcion: '', calle_obra: '',
+                            meta: '', fecha_inicio: '', fecha_termino: '', colonia: '',
+                            geolocalizacion: '', supervisor: 'CARLOS', nuevo_supervisor: '',
+                            costo: '', origen_recurso: ''
+                        });
+                        setModalMsg({ type: '', text: '' });
+                        cargarCatalogoObras();
+                    }, 1500);
+                } catch (error) {
+                    setModalMsg({ type: 'error', text: 'Error al registrar obra.' });
+                } finally {
+                    setLoadingModal(false);
+                }
+            };
+
+            // Al seleccionar una Obra del dropdown principal
+            const handleObraSelectChange = (e) => {
+                const nombreSel = e.target.value;
+                const obraEncontrada = obrasDb.find(o => o.nombre_obra === nombreSel);
+
+                if (obraEncontrada) {
+                    setFormData(prev => ({
+                        ...prev,
+                        nombre_obra: nombreSel,
+                        numero_obra: obraEncontrada.numero_obra,
+                        supervisor: obraEncontrada.supervisor,
+                        supervisor_obra_publicas: obraEncontrada.supervisor_obra_publicas || obraEncontrada.SUPERVISOR_OBRA_PUBLICAS || ''
+                    }));
+
+                    if (obraEncontrada.geolocalizacion) {
+                        const coords = obraEncontrada.geolocalizacion.split(',').map(s => parseFloat(String(s).trim()));
+                        if (coords.length >= 2 && !isNaN(coords[0]) && !isNaN(coords[1])) {
+                            mapRef.current.setView([coords[0], coords[1]], 14);
+                            actualizarRutaYDistancia(coords[0], coords[1]);
+                        }
+                    }
+                } else {
+                    setFormData(prev => ({ ...prev, nombre_obra: nombreSel, numero_obra: '', supervisor: '', supervisor_obra_publicas: '' }));
+                }
+            };
+
+            const actualizarRutaYDistancia = async (lat, lng) => {
+                setMapSelection(prev => ({ ...prev, coordsDestino: [lat, lng] }));
+
+                if (markerRef.current) {
+                    markerRef.current.setLatLng([lat, lng]);
+                } else {
+                    markerRef.current = L.marker([lat, lng], { draggable: true }).addTo(mapRef.current);
+                }
+
+                try {
+                    const res = await fetch(`https://router.project-osrm.org/route/v1/driving/${ORIGEN_COORDS[1]},${ORIGEN_COORDS[0]};${lng},${lat}?overview=false`);
+                    const data = await res.json();
+                    if (data.routes && data.routes.length > 0) {
+                        const distanceKm = (data.routes[0].distance / 1000).toFixed(2);
+                        const durationMin = Math.round(data.routes[0].duration / 60);
+
+                        setMapSelection({
+                            distancia: `${distanceKm} KM`,
+                            tiempo: `${durationMin} MIN`,
+                            coordsDestino: [lat, lng]
+                        });
+                        setFormData(prev => ({ ...prev, kilometraje: distanceKm }));
+                    }
+                } catch (err) {
+                    const distanceLineal = mapRef.current.distance(ORIGEN_COORDS, [lat, lng]) / 1000;
+                    const estKm = (distanceLineal * 1.3).toFixed(2);
+                    const estMin = Math.round(estKm * 1.5);
+
+                    setMapSelection({
+                        distancia: `${estKm} KM (EST.)`,
+                        tiempo: `${estMin} MIN (EST.)`,
+                        coordsDestino: [lat, lng]
+                    });
+                    setFormData(prev => ({ ...prev, kilometraje: estKm }));
+                }
+            };
+
+            const irAlAyuntamiento = () => {
+                if (mapRef.current) {
+                    mapRef.current.setView(ORIGEN_COORDS, 14);
+                    actualizarRutaYDistancia(ORIGEN_COORDS[0], ORIGEN_COORDS[1]);
+                }
+            };
+
+            const usarUbicacionDispositivo = () => {
+                if (navigator.geolocation) {
+                    navigator.geolocation.getCurrentPosition(
+                        (position) => {
+                            const { latitude, longitude } = position.coords;
+                            if (mapRef.current) {
+                                mapRef.current.setView([latitude, longitude], 14);
+                                actualizarRutaYDistancia(latitude, longitude);
+                            }
+                        },
+                        () => alert("Permiso de localización denegado."),
+                        { enableHighAccuracy: true, timeout: 10000 }
+                    );
+                }
+            };
+
+            // Inicializar Mapa
+            useEffect(() => {
+                if (!mapRef.current) {
+                    const map = L.map('map').setView(ORIGEN_COORDS, 13);
+                    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                        attribution: '&copy; OpenStreetMap'
+                    }).addTo(map);
+
+                    L.marker(ORIGEN_COORDS, { title: "Ayuntamiento" }).addTo(map).bindPopup("<b>Ayuntamiento de Huimanguillo</b>").openPopup();
+
+                    map.on('click', (e) => {
+                        const { lat, lng } = e.latlng;
+                        actualizarRutaYDistancia(lat, lng);
+                        setNuevaObra(prev => ({ ...prev, geolocalizacion: `${lat.toFixed(6)},${lng.toFixed(6)}` }));
+                    });
+
+                    mapRef.current = map;
+                }
+            }, []);
+
+            const combustibleUsado = formData.kilometraje ? (parseFloat(formData.kilometraje) / 13).toFixed(2) : '0.00';
+            const costoAprox = (combustibleUsado !== '0.00' && formData.precio_combustible)
+                ? (parseFloat(combustibleUsado) * parseFloat(formData.precio_combustible)).toFixed(2)
+                : '0.00';
+
+            const handleMultipleFilesChange = (e, tipo) => {
+                const files = Array.from(e.target.files || []);
+                if (files.length === 0) return;
+
+                files.forEach(file => {
+                    const reader = new FileReader();
+                    reader.onload = (event) => {
+                        const img = new Image();
+                        img.onload = () => {
+                            const canvas = document.createElement('canvas');
+                            const MAX_WIDTH = 1024;
+                            const scale = MAX_WIDTH / img.width;
+                            canvas.width = (img.width > MAX_WIDTH) ? MAX_WIDTH : img.width;
+                            canvas.height = (img.width > MAX_WIDTH) ? (img.height * scale) : img.height;
+
+                            const ctx = canvas.getContext('2d');
+                            ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+                            const base64 = canvas.toDataURL('image/jpeg', 0.7);
+                            if (tipo === 'evidencia') {
+                                setFotosEvidencia(prev => [...prev, base64]);
+                            } else if (tipo === 'tablero') {
+                                setFotosTablero(prev => [...prev, base64]);
+                            }
+                        };
+                        img.src = event.target.result;
+                    };
+                    reader.readAsDataURL(file);
+                });
+                e.target.value = '';
+            };
+
+            const eliminarFoto = (tipo, index) => {
+                if (tipo === 'evidencia') {
+                    setFotosEvidencia(prev => prev.filter((_, i) => i !== index));
+                } else if (tipo === 'tablero') {
+                    setFotosTablero(prev => prev.filter((_, i) => i !== index));
+                }
+            };
+
+            const handleDescargarExcel = async () => {
+                setLoadingModal(true);
+                setModalMsg({ type: 'info', text: 'Generando archivo de Excel... (esto puede tomar un momento por las imágenes)' });
+                try {
+                    const data = await fetchJsonp(`${WEB_APP_URL}?action=get_datos_descarga`, "descarga");
+                    if (data.status === "SUCCESS" && data.datos && data.datos.bitacora) {
+                        const { bitacora, fotos } = data.datos;
+
+                        // Crear workbook de ExcelJS
+                        const workbook = new ExcelJS.Workbook();
+                        workbook.creator = 'App Obras';
+                        workbook.created = new Date();
+
+                        // --- HOJA BITÁCORA ---
+                        const wsBitacora = workbook.addWorksheet('Bitácora');
+                        if (bitacora.length > 0) {
+                            const cabecerasBit = Object.keys(bitacora[0]);
+                            wsBitacora.addRow(cabecerasBit);
+                            wsBitacora.getRow(1).font = { bold: true };
+                            bitacora.forEach(row => wsBitacora.addRow(Object.values(row)));
+                        }
+
+                        // --- HOJA BITÁCORA FOTOS ---
+                        const wsFotos = workbook.addWorksheet('Bitácora_fotos');
+                        if (fotos.length > 0) {
+                            const cabecerasFot = Object.keys(fotos[0]);
+                            wsFotos.addRow(cabecerasFot);
+                            wsFotos.getRow(1).font = { bold: true };
+
+                            // Ajustar anchos y altos
+                            // "FOTO" es la columna 7 (G) - Índice 6
+                            wsFotos.getColumn('G').width = 15; // aprox 80px
+
+                            for (let i = 0; i < fotos.length; i++) {
+                                const rowData = fotos[i];
+                                const rowIndex = i + 2; // Fila real en excel
+
+                                // Crear fila con celda FOTO vacía para que no aparezca la URL escrita
+                                const rowValues = [
+                                    rowData["BITACORA_FECHA"] || "",
+                                    rowData["BITACORA_DÍA"] || "",
+                                    rowData["BITACORA_SEMANA"] || "",
+                                    rowData["BITACORA_MES"] || "",
+                                    rowData["BITACORA_NÚMERO OBRA"] || "",
+                                    rowData["BITACORA_NOMBRE DE LA OBRA"] || "",
+                                    "", // FOTO vacía (Columna G)
+                                    rowData["TIPO"] || ""
+                                ];
+
+                                const row = wsFotos.addRow(rowValues);
+                                row.height = 45; // aprox 60px
+
+                                const fotoUrl = rowData["FOTO"];
+                                let directUrl = null;
+                                if (fotoUrl && fotoUrl.includes('drive.google.com/file/d/')) {
+                                    const matchId = fotoUrl.match(/\/d\/([a-zA-Z0-9_-]+)/);
+                                    if (matchId && matchId[1]) {
+                                        directUrl = `https://lh3.googleusercontent.com/d/${matchId[1]}`;
+                                    }
+                                } else if (fotoUrl && fotoUrl.includes('lh3.googleusercontent.com')) {
+                                    directUrl = fotoUrl;
+                                }
+
+                                if (directUrl) {
+                                    try {
+                                        const response = await fetch(directUrl);
+                                        const arrayBuffer = await response.arrayBuffer();
+                                        const imageId = workbook.addImage({
+                                            buffer: arrayBuffer,
+                                            extension: 'jpeg',
+                                        });
+                                        wsFotos.addImage(imageId, {
+                                            tl: { col: 6, row: rowIndex - 1 }, // Col G, Fila i+1 (0-indexed)
+                                            ext: { width: 80, height: 60 }
+                                        });
+                                    } catch (e) {
+                                        console.warn("Error cargando imagen para excel:", directUrl, e);
+                                    }
+                                }
+                            }
+                        }
+
+                        // Generar y descargar archivo
+                        const buffer = await workbook.xlsx.writeBuffer();
+                        const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+                        const fechaExport = new Date().toISOString().split('T')[0];
+                        saveAs(blob, `Bitacora_Obras_${fechaExport}.xlsx`);
+
+                        setModalMsg({ type: 'success', text: '¡Descarga completada!' });
+                    } else {
+                        setModalMsg({ type: 'error', text: 'No hay datos para descargar.' });
+                    }
+                } catch (error) {
+                    console.error("Error al descargar Excel", error);
+                    setModalMsg({ type: 'error', text: 'Error al generar el Excel.' });
+                } finally {
+                    setTimeout(() => {
+                        setModalMsg({ type: '', text: '' });
+                        setLoadingModal(false);
+                    }, 2000);
+                }
+            };
+
+            const handleInputChange = (e) => {
+                const { name, value } = e.target;
+                setFormData(prev => ({ ...prev, [name]: value }));
+            };
+
+            const handleSubmit = async (e) => {
+                e.preventDefault();
+                if (!formData.precio_combustible) {
+                    setStatusMsg({ type: 'error', text: 'Debe capturar el Precio Litro ($).' });
+                    return;
+                }
+                if (fotosEvidencia.length === 0 || fotosTablero.length === 0) {
+                    setStatusMsg({ type: 'error', text: 'Debes capturar al menos 1 fotografía de evidencia y 1 de tablero.' });
+                    return;
+                }
+
+                setLoading(true);
+                setStatusMsg({ type: 'info', text: 'Enviando bitácora y subiendo fotografías a Google Drive...' });
+
+                const ahora = new Date();
+                const fechaString = ahora.toLocaleString('es-MX', { hour12: false });
+                const dia = String(ahora.getDate()).padStart(2, '0');
+                const mes = ahora.toLocaleString('es-MX', { month: 'long' }).toUpperCase();
+
+                const payload = {
+                    action: "save_bitacora",
+                    fecha: fechaString,
+                    dia: dia,
+                    mes: mes,
+                    numero_obra: formData.numero_obra,
+                    nombre_obra: formData.nombre_obra.toUpperCase(),
+                    supervisor: formData.supervisor.toUpperCase(),
+                    kilometraje: formData.kilometraje,
+                    combustible: combustibleUsado,
+                    precio_combustible: formData.precio_combustible,
+                    costo_aprox: costoAprox,
+                    distancia: mapSelection.distancia,
+                    tiempo_traslado: mapSelection.tiempo,
+                    fotos_evidencia_base64: fotosEvidencia.map(f => f.split(',')[1]),
+                    fotos_tablero_base64: fotosTablero.map(f => f.split(',')[1]),
+                    foto_evidencia_base64: fotosEvidencia[0].split(',')[1],
+                    foto_tablero_base64: fotosTablero[0].split(',')[1],
+                };
+
+                try {
+                    const response = await fetch(WEB_APP_URL, {
+                        method: 'POST',
+                        mode: 'cors',
+                        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+                        body: JSON.stringify(payload)
+                    });
+
+                    const resJson = await response.json();
+
+                    if (resJson.status === "SUCCESS") {
+                        setStatusMsg({ type: 'success', text: `¡Bitácora guardada con éxito! (${fotosEvidencia.length} evidencias, ${fotosTablero.length} tablero)` });
+                        setFormData({
+                            nombre_obra: '', numero_obra: '', supervisor: '', supervisor_obra_publicas: '',
+                            kilometraje: '', precio_combustible: ''
+                        });
+                        setFotosEvidencia([]);
+                        setFotosTablero([]);
+                    } else {
+                        console.error("Error devuelto por Apps Script:", resJson);
+                        setStatusMsg({ type: 'error', text: 'Error del servidor: ' + (resJson.message || 'Error desconocido al procesar registro.') });
+                    }
+                } catch (error) {
+                    console.error("Fallo de red o CORS al enviar POST:", error);
+                    // Si se bloquea por CORS local pero igual se procesó (fallback de envío ciego)
+                    setStatusMsg({ type: 'success', text: 'Enviado ciegamente (modo local/offline). Verifica la hoja de Google Sheets.' });
+                } finally {
+                    setLoading(false);
+                }
+            };
+
+            return (
+                <div className="w-full max-w-4xl mx-auto p-4 md:p-6 relative">
+                    <header className="mb-6 flex justify-between items-center flex-wrap gap-2">
+                        <div>
+                            <h1 className="text-2xl font-light text-slate-800 tracking-tight">Bitácora</h1>
+                            <p className="text-xs text-slate-400">Huimanguillo, Tabasco</p>
+                        </div>
+                        {/* Botonera Principal */}
+                        <div className="flex gap-1.5">
+                            <button
+                                type="button"
+                                onClick={cargarCatalogoObras}
+                                className="bg-slate-100 hover:bg-slate-200 text-slate-600 px-2.5 py-1.5 rounded-lg text-xs font-semibold border border-slate-200 transition"
+                                title="Actualizar catálogos"
+                            >
+                                Refrescar
+                            </button>
+                            <button
+                                type="button"
+                                onClick={handleDescargarExcel}
+                                disabled={loadingModal}
+                                className="bg-blue-50 hover:bg-blue-100 text-blue-600 px-2.5 py-1.5 rounded-lg text-xs font-semibold border border-blue-100 transition disabled:opacity-50"
+                                title="Descargar datos a Excel"
+                            >
+                                Descargar
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => setShowEvidenciasModal(true)}
+                                className="bg-emerald-50 hover:bg-emerald-100 text-emerald-600 px-2.5 py-1.5 rounded-lg text-xs font-semibold border border-emerald-100 transition"
+                            >
+                                Evidencias
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => setShowModal(true)}
+                                className="bg-indigo-50 hover:bg-indigo-100 text-indigo-600 px-2.5 py-1.5 rounded-lg text-xs font-semibold border border-indigo-100 transition"
+                            >
+                                + Nueva Obra
+                            </button>
+                        </div>
+                    </header>
+
+                    {/* Formulario Principal */}
+                    <form onSubmit={handleSubmit} className="bg-white rounded-2xl shadow-sm border border-slate-100 p-5 space-y-5">
+                        {/* Dropdown Obra */}
+                        <div>
+                            <label className="block text-xs font-semibold text-slate-500 uppercase mb-1">Nombre de la Obra</label>
+                            <select
+                                name="nombre_obra"
+                                value={formData.nombre_obra}
+                                onChange={handleObraSelectChange}
+                                required
+                                className="w-full bg-slate-50 border border-slate-200 rounded-lg py-2 px-3 text-sm focus:outline-none focus:border-slate-300"
+                            >
+                                <option value="">-- SELECCIONE UNA OBRA --</option>
+                                {obrasDb.map((obra, idx) => (
+                                    <option key={idx} value={obra.nombre_obra}>{obra.nombre_obra}</option>
+                                ))}
+                            </select>
+                        </div>
+
+                        {/* Campos de lectura */}
+                        <div className="grid grid-cols-2 gap-3">
+                            <div>
+                                <label className="block text-xs font-semibold text-slate-500 uppercase mb-1">Número Obra</label>
+                                <input type="text" disabled value={formData.numero_obra} className="w-full bg-slate-100 border border-slate-200 rounded-lg py-2 px-3 text-sm text-slate-500 focus:outline-none" placeholder="Automático" />
+                            </div>
+                            <div>
+                                <label className="block text-xs font-semibold text-slate-500 uppercase mb-1">Supervisor</label>
+                                <input type="text" disabled value={formData.supervisor} className="w-full bg-slate-100 border border-slate-200 rounded-lg py-2 px-3 text-sm text-slate-500 focus:outline-none" placeholder="Automático" />
+                            </div>
+                            <div className="col-span-2">
+                                <label className="block text-xs font-semibold text-slate-500 uppercase mb-1">Supervisor Obras Públicas</label>
+                                <input type="text" disabled value={formData.supervisor_obra_publicas} className="w-full bg-slate-100 border border-slate-200 rounded-lg py-2 px-3 text-sm text-slate-500 focus:outline-none" placeholder="Automático" />
+                            </div>
+                        </div>
+
+                        {/* Mapa Geolocalización */}
+                        <div className="relative">
+                            <div className="flex justify-between items-center mb-1">
+                                <label className="block text-xs font-semibold text-slate-500 uppercase">Ubicación</label>
+                                <div className="flex gap-1">
+                                    <button type="button" onClick={irAlAyuntamiento} className="text-[10px] bg-slate-100 hover:bg-slate-200 text-slate-600 px-2 py-0.5 rounded font-medium">Ayuntamiento</button>
+                                    <button type="button" onClick={usarUbicacionDispositivo} className="text-[10px] bg-slate-100 hover:bg-slate-200 text-slate-600 px-2 py-0.5 rounded font-medium">Mi ubicación</button>
+                                </div>
+                            </div>
+                            <div id="map" className="border border-slate-200"></div>
+                            <div className="grid grid-cols-2 gap-2 mt-2 bg-slate-50 p-2.5 rounded-lg text-xs border border-slate-100">
+                                <div><span className="text-slate-400">Distancia:</span> <strong className="text-slate-600 block">{mapSelection.distancia}</strong></div>
+                                <div><span className="text-slate-400">Tiempo Traslado:</span> <strong className="text-slate-600 block">{mapSelection.tiempo}</strong></div>
+                            </div>
+                        </div>
+
+                        {/* Evidencia Foto (Múltiples / Cámara / Galería) */}
+                        <div className="space-y-2 bg-slate-50 p-3 rounded-xl border border-slate-200">
+                            <div className="flex justify-between items-center">
+                                <label className="block text-xs font-semibold text-slate-600 uppercase">
+                                    FOTOS DE OBRA ({fotosEvidencia.length})
+                                </label>
+                                {fotosEvidencia.length > 0 && (
+                                    <button
+                                        type="button"
+                                        onClick={() => setFotosEvidencia([])}
+                                        className="text-[10px] text-red-500 hover:underline font-medium"
+                                    >
+                                        Limpiar ({fotosEvidencia.length})
+                                    </button>
+                                )}
+                            </div>
+                            <div className="grid grid-cols-2 gap-2">
+                                <label className="flex items-center justify-center gap-1.5 bg-white hover:bg-slate-100 text-slate-700 py-2 px-2.5 rounded-lg text-xs font-semibold cursor-pointer border border-slate-200 shadow-sm transition active:scale-95">
+                                    <span>📸 Tomar Foto</span>
+                                    <input
+                                        type="file"
+                                        accept="image/*"
+                                        capture="environment"
+                                        onChange={(e) => handleMultipleFilesChange(e, 'evidencia')}
+                                        className="hidden"
+                                    />
+                                </label>
+                                <label className="flex items-center justify-center gap-1.5 bg-white hover:bg-slate-100 text-slate-700 py-2 px-2.5 rounded-lg text-xs font-semibold cursor-pointer border border-slate-200 shadow-sm transition active:scale-95">
+                                    <span>🖼️ Galería (Varias)</span>
+                                    <input
+                                        type="file"
+                                        accept="image/*"
+                                        multiple
+                                        onChange={(e) => handleMultipleFilesChange(e, 'evidencia')}
+                                        className="hidden"
+                                    />
+                                </label>
+                            </div>
+                            {fotosEvidencia.length > 0 && (
+                                <div className="grid grid-cols-3 gap-2 pt-1">
+                                    {fotosEvidencia.map((foto, idx) => (
+                                        <div key={idx} className="relative group rounded-lg overflow-hidden border border-slate-200 aspect-square shadow-sm bg-black">
+                                            <img src={foto} alt={`Evidencia ${idx + 1}`} className="w-full h-full object-cover" />
+                                            <button
+                                                type="button"
+                                                onClick={() => eliminarFoto('evidencia', idx)}
+                                                className="absolute top-1 right-1 bg-red-600/90 hover:bg-red-700 text-white rounded-full w-5 h-5 flex items-center justify-center text-xs shadow font-bold"
+                                                title="Eliminar foto"
+                                            >
+                                                &times;
+                                            </button>
+                                            <span className="absolute bottom-1 left-1 bg-black/70 text-white text-[9px] px-1 rounded font-medium">#{idx + 1}</span>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
+
+                        {/* KMs y Combustible */}
+                        <div className="grid grid-cols-2 gap-3">
+                            <div>
+                                <label className="block text-xs font-semibold text-slate-500 uppercase mb-1">KMs Recorridos</label>
+                                <input type="text" disabled value={formData.kilometraje} className="w-full bg-slate-100 border border-slate-200 rounded-lg py-2 px-3 text-sm text-slate-600 font-medium focus:outline-none" placeholder="Usa el mapa" />
+                            </div>
+                            <div>
+                                <label className="block text-xs font-semibold text-slate-500 uppercase mb-1">Combustible (L)</label>
+                                <input type="text" disabled value={combustibleUsado} className="w-full bg-slate-100 border border-slate-200 rounded-lg py-2 px-3 text-sm text-slate-500 focus:outline-none" />
+                            </div>
+                        </div>
+
+                        {/* Precios combustible */}
+                        <div className="grid grid-cols-2 gap-3">
+                            <div>
+                                <label className="block text-xs font-semibold text-slate-500 uppercase mb-1">Precio Litro ($)</label>
+                                <input type="number" step="0.01" name="precio_combustible" required value={formData.precio_combustible} onChange={handleInputChange} className="w-full bg-slate-50 border border-slate-200 rounded-lg py-2 px-3 text-sm focus:outline-none focus:border-slate-300" placeholder="0.00" />
+                            </div>
+                            <div>
+                                <label className="block text-xs font-semibold text-slate-500 uppercase mb-1">Costo Aprox ($)</label>
+                                <input type="text" disabled value={costoAprox} className="w-full bg-slate-100 border border-slate-200 rounded-lg py-2 px-3 text-sm text-slate-500 focus:outline-none font-medium" />
+                            </div>
+                        </div>
+
+                        {/* Tablero Foto (Múltiples / Cámara / Galería) */}
+                        <div className="space-y-2 bg-slate-50 p-3 rounded-xl border border-slate-200">
+                            <div className="flex justify-between items-center">
+                                <label className="block text-xs font-semibold text-slate-600 uppercase">
+                                    Fotos Tablero ({fotosTablero.length})
+                                </label>
+                                {fotosTablero.length > 0 && (
+                                    <button
+                                        type="button"
+                                        onClick={() => setFotosTablero([])}
+                                        className="text-[10px] text-red-500 hover:underline font-medium"
+                                    >
+                                        Limpiar ({fotosTablero.length})
+                                    </button>
+                                )}
+                            </div>
+                            <div className="grid grid-cols-2 gap-2">
+                                <label className="flex items-center justify-center gap-1.5 bg-white hover:bg-slate-100 text-slate-700 py-2 px-2.5 rounded-lg text-xs font-semibold cursor-pointer border border-slate-200 shadow-sm transition active:scale-95">
+                                    <span>📸 Tomar Foto</span>
+                                    <input
+                                        type="file"
+                                        accept="image/*"
+                                        capture="environment"
+                                        onChange={(e) => handleMultipleFilesChange(e, 'tablero')}
+                                        className="hidden"
+                                    />
+                                </label>
+                                <label className="flex items-center justify-center gap-1.5 bg-white hover:bg-slate-100 text-slate-700 py-2 px-2.5 rounded-lg text-xs font-semibold cursor-pointer border border-slate-200 shadow-sm transition active:scale-95">
+                                    <span>🖼️ Galería (Varias)</span>
+                                    <input
+                                        type="file"
+                                        accept="image/*"
+                                        multiple
+                                        onChange={(e) => handleMultipleFilesChange(e, 'tablero')}
+                                        className="hidden"
+                                    />
+                                </label>
+                            </div>
+                            {fotosTablero.length > 0 && (
+                                <div className="grid grid-cols-3 gap-2 pt-1">
+                                    {fotosTablero.map((foto, idx) => (
+                                        <div key={idx} className="relative group rounded-lg overflow-hidden border border-slate-200 aspect-square shadow-sm bg-black">
+                                            <img src={foto} alt={`Tablero ${idx + 1}`} className="w-full h-full object-cover" />
+                                            <button
+                                                type="button"
+                                                onClick={() => eliminarFoto('tablero', idx)}
+                                                className="absolute top-1 right-1 bg-red-600/90 hover:bg-red-700 text-white rounded-full w-5 h-5 flex items-center justify-center text-xs shadow font-bold"
+                                                title="Eliminar foto"
+                                            >
+                                                &times;
+                                            </button>
+                                            <span className="absolute bottom-1 left-1 bg-black/70 text-white text-[9px] px-1 rounded font-medium">#{idx + 1}</span>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
+
+                        {statusMsg.text && (
+                            <div className={`p-3 rounded-lg text-xs font-medium text-center ${statusMsg.type === 'error' ? 'bg-red-50 text-red-600' : statusMsg.type === 'success' ? 'bg-emerald-50 text-emerald-600' : 'bg-blue-50 text-blue-600'}`}>{statusMsg.text}</div>
+                        )}
+
+                        <button type="submit" disabled={loading} className="w-full py-2.5 bg-slate-800 hover:bg-slate-900 text-white rounded-lg font-medium text-sm transition disabled:opacity-50">{loading ? 'Procesando y guardando fotos...' : 'Guardar en Bitácora'}</button>
+                    </form>
+
+                    {/* MODAL: CONSULTA DE EVIDENCIAS HISTÓRICAS */}
+                    {showEvidenciasModal && (
+                        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex justify-center items-center p-4 z-50 overflow-y-auto">
+                            <div className="bg-white rounded-2xl shadow-xl w-full max-w-md max-h-[90vh] overflow-y-auto p-6 space-y-4">
+                                <div className="flex justify-between items-center border-b pb-2">
+                                    <h3 className="text-lg font-medium text-slate-800 font-light">Consulta de Evidencias</h3>
+                                    <button onClick={() => { setShowEvidenciasModal(false); setSelectedObraEvidencia(''); setFichaTecnicaObra(null); setHistorialEvidencias([]); }} className="text-slate-400 hover:text-slate-600 text-xl font-bold">&times;</button>
+                                </div>
+
+                                {/* Selección de Obra */}
+                                <div className="space-y-1">
+                                    <label className="block text-xs font-semibold text-slate-500 uppercase">Seleccione Obra</label>
+                                    <select
+                                        value={selectedObraEvidencia}
+                                        onChange={handleObraEvidenciaSelect}
+                                        className="w-full bg-slate-50 border border-slate-200 rounded-lg py-1.5 px-3 text-sm focus:outline-none"
+                                    >
+                                        <option value="">-- SELECCIONE --</option>
+                                        {obrasDb.map((obra, idx) => (
+                                            <option key={idx} value={obra.nombre_obra}>{obra.nombre_obra}</option>
+                                        ))}
+                                    </select>
+                                </div>
+
+                                {/* 1. Bloque de Texto: Ficha Técnica (Hoja OBRAS) */}
+                                {fichaTecnicaObra && (
+                                    <div className="bg-slate-50 p-4 rounded-xl border border-slate-150 text-xs space-y-1.5">
+                                        <h4 className="font-semibold text-slate-700 border-b pb-1 mb-1.5 uppercase tracking-wide">Ficha Técnica de la Obra</h4>
+                                        <p><span className="text-slate-400 font-medium">NÚMERO OBRA:</span> <strong className="text-slate-600">{fichaTecnicaObra.numero_obra}</strong></p>
+                                        <p><span className="text-slate-400 font-medium">DESCRIPCIÓN:</span> <strong className="text-slate-600">{fichaTecnicaObra.descripcion || 'SIN REGISTRO'}</strong></p>
+                                        <p><span className="text-slate-400 font-medium">UBICACIÓN:</span> <strong className="text-slate-600">{fichaTecnicaObra.calle_obra}, COL. {fichaTecnicaObra.colonia || 'N/A'}</strong></p>
+                                        <p><span className="text-slate-400 font-medium">META:</span> <strong className="text-slate-600">{fichaTecnicaObra.meta || 'N/A'}</strong></p>
+                                        <p><span className="text-slate-400 font-medium">PLAZO DE EJECUCIÓN:</span> <strong className="text-slate-600">{fichaTecnicaObra.fecha_inicio} AL {fichaTecnicaObra.fecha_termino} ({fichaTecnicaObra.dias_plazo} DÍAS)</strong></p>
+                                        <p><span className="text-slate-400 font-medium">SUPERVISOR:</span> <strong className="text-slate-600">{fichaTecnicaObra.supervisor}</strong></p>
+                                        <p><span className="text-slate-400 font-medium">RECURSO APROBADO:</span> <strong className="text-slate-600">${parseFloat(fichaTecnicaObra.costo || 0).toLocaleString()} MXN ({fichaTecnicaObra.origen_recurso})</strong></p>
+                                        <p><span className="text-slate-400 font-medium">GEOLOCALIZACIÓN:</span> <strong className="text-slate-600 font-mono">{fichaTecnicaObra.geolocalizacion}</strong></p>
+                                    </div>
+                                )}
+
+                                {/* 2. Listado Histórico de Fotos (Hoja BITACORA_OBRAS) */}
+                                <div className="space-y-3">
+                                    <h4 className="font-semibold text-xs text-slate-500 uppercase tracking-wide">Historial de Visitas y Fotos</h4>
+
+                                    {loadingEvidencias && (
+                                        <p className="text-xs text-slate-400 text-center py-4 animate-pulse">Cargando registros históricos de fotos...</p>
+                                    )}
+
+                                    {!loadingEvidencias && selectedObraEvidencia && historialEvidencias.length === 0 && (
+                                        <p className="text-xs text-slate-400 text-center py-4">No se encontraron visitas registradas en la bitácora para esta obra.</p>
+                                    )}
+
+                                    {historialEvidencias.map((reg, index) => {
+                                        const fotosEvidenciaList = extraerUrlsDrive(reg.foto_evidencia);
+                                        const fotosTableroList = extraerUrlsDrive(reg.foto_tablero);
+
+                                        return (
+                                            <div key={index} className="bg-white border rounded-xl p-3.5 space-y-3 shadow-sm">
+                                                <div className="flex justify-between items-center text-[11px] border-b pb-1 text-slate-400">
+                                                    <span>Fecha: <strong className="text-slate-600">{reg.fecha}</strong></span>
+                                                    <span>Sup: <strong className="text-slate-600">{reg.supervisor}</strong></span>
+                                                </div>
+                                                {reg.id_inspeccion && (
+                                                    <div className="text-[10px] text-slate-400 mt-1">
+                                                        ID Inspección: <strong className="font-mono text-slate-500">{reg.id_inspeccion}</strong>
+                                                    </div>
+                                                )}
+                                                {reg.observaciones && (
+                                                    <p className="text-xs text-slate-600 bg-slate-50 p-2 rounded italic border border-slate-100">"{reg.observaciones}"</p>
+                                                )}
+
+                                                {/* Datos de Avance de Obra */}
+                                                {(reg.porcentaje_avance || reg.comentarios_avances || reg.pendientes) && (
+                                                    <div className="bg-blue-50/50 p-2.5 rounded-lg border border-blue-100 text-xs space-y-1.5 mt-2">
+                                                        {reg.porcentaje_avance && (
+                                                            <div className="font-semibold text-blue-800 flex justify-between items-center border-b border-blue-200 pb-1">
+                                                                <span className="uppercase tracking-wide text-[10px]">Avance Registrado</span>
+                                                                <span className="text-sm">{reg.porcentaje_avance}%</span>
+                                                            </div>
+                                                        )}
+                                                        {reg.comentarios_avances && (
+                                                            <p className="text-blue-700 leading-relaxed"><span className="font-medium opacity-80">Comentarios:</span> {reg.comentarios_avances}</p>
+                                                        )}
+                                                        {reg.pendientes && (
+                                                            <p className="text-blue-700/80 leading-relaxed"><span className="font-medium">Pendientes:</span> {reg.pendientes}</p>
+                                                        )}
+                                                    </div>
+                                                )}
+
+                                                {/* Galería de Fotos de Evidencia */}
+                                                <div className="space-y-1">
+                                                    <span className="block text-[10px] text-slate-500 font-bold uppercase tracking-wider">
+                                                        Evidencia ({fotosEvidenciaList.length})
+                                                    </span>
+                                                    {fotosEvidenciaList.length > 0 ? (
+                                                        <div className="grid grid-cols-2 gap-2">
+                                                            {fotosEvidenciaList.map((imgObj, fIdx) => (
+                                                                <a key={fIdx} href={imgObj.original} target="_blank" rel="noopener noreferrer" className="block relative group rounded-lg overflow-hidden border border-slate-200 shadow-sm aspect-video bg-slate-100">
+                                                                    <img
+                                                                        src={imgObj.direct}
+                                                                        alt={`Evidencia ${fIdx + 1}`}
+                                                                        className="w-full h-full object-cover transition group-hover:scale-105"
+                                                                        loading="lazy"
+                                                                        onError={(e) => {
+                                                                            if (e.target.src !== imgObj.fallback) {
+                                                                                e.target.src = imgObj.fallback;
+                                                                            }
+                                                                        }}
+                                                                    />
+                                                                    <span className="absolute bottom-1 right-1 bg-black/60 text-white text-[9px] px-1.5 py-0.5 rounded font-medium">🔍 Ver foto</span>
+                                                                </a>
+                                                            ))}
+                                                        </div>
+                                                    ) : (
+                                                        <span className="block text-[10px] text-slate-300 text-center py-3 border border-dashed rounded-lg">Sin Imagen</span>
+                                                    )}
+                                                </div>
+
+                                                {/* Galería de Fotos de Tablero */}
+                                                <div className="space-y-1">
+                                                    <span className="block text-[10px] text-slate-500 font-bold uppercase tracking-wider">
+                                                        Tablero ({fotosTableroList.length})
+                                                    </span>
+                                                    {fotosTableroList.length > 0 ? (
+                                                        <div className="grid grid-cols-2 gap-2">
+                                                            {fotosTableroList.map((imgObj, tIdx) => (
+                                                                <a key={tIdx} href={imgObj.original} target="_blank" rel="noopener noreferrer" className="block relative group rounded-lg overflow-hidden border border-slate-200 shadow-sm aspect-video bg-slate-100">
+                                                                    <img
+                                                                        src={imgObj.direct}
+                                                                        alt={`Tablero ${tIdx + 1}`}
+                                                                        className="w-full h-full object-cover transition group-hover:scale-105"
+                                                                        loading="lazy"
+                                                                        onError={(e) => {
+                                                                            if (e.target.src !== imgObj.fallback) {
+                                                                                e.target.src = imgObj.fallback;
+                                                                            }
+                                                                        }}
+                                                                    />
+                                                                    <span className="absolute bottom-1 right-1 bg-black/60 text-white text-[9px] px-1.5 py-0.5 rounded font-medium">🔍 Ver foto</span>
+                                                                </a>
+                                                            ))}
+                                                        </div>
+                                                    ) : (
+                                                        <span className="block text-[10px] text-slate-300 text-center py-3 border border-dashed rounded-lg">Sin Imagen</span>
+                                                    )}
+                                                </div>
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* MODAL: REGISTRO NUEVA OBRA */}
+                    {showModal && (
+                        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex justify-center items-center p-4 z-50 overflow-y-auto">
+                            <div className="bg-white rounded-2xl shadow-xl w-full max-w-md max-h-[90vh] overflow-y-auto p-6 space-y-4">
+                                <div className="flex justify-between items-center border-b pb-2">
+                                    <h3 className="text-lg font-medium text-slate-800">Nueva Obra</h3>
+                                    <button onClick={() => setShowModal(false)} className="text-slate-400 hover:text-slate-600 text-xl font-bold">&times;</button>
+                                </div>
+
+                                <form onSubmit={handleSubmitNuevaObra} className="space-y-3.5">
+                                    <div>
+                                        <label className="block text-xs font-semibold text-slate-500 uppercase">Número Obra</label>
+                                        <input type="text" name="numero_obra" required value={nuevaObra.numero_obra} onChange={handleNuevaObraChange} className="w-full bg-slate-50 border border-slate-200 rounded-lg py-1.5 px-3 text-sm focus:outline-none uppercase-input" placeholder="Ej: K0001" />
+                                    </div>
+
+                                    <div>
+                                        <label className="block text-xs font-semibold text-slate-500 uppercase">Nombre Obra</label>
+                                        <input type="text" name="nombre_obra" required value={nuevaObra.nombre_obra} onChange={handleNuevaObraChange} className="w-full bg-slate-50 border border-slate-200 rounded-lg py-1.5 px-3 text-sm focus:outline-none uppercase-input" placeholder="Nombre descriptivo" />
+                                    </div>
+
+                                    <div>
+                                        <label className="block text-xs font-semibold text-slate-500 uppercase">Descripción</label>
+                                        <textarea name="descripcion" required rows="2" value={nuevaObra.descripcion} onChange={handleNuevaObraChange} className="w-full bg-slate-50 border border-slate-200 rounded-lg py-1.5 px-3 text-sm focus:outline-none uppercase-input"></textarea>
+                                    </div>
+
+                                    <div className="grid grid-cols-2 gap-2">
+                                        <div>
+                                            <label className="block text-xs font-semibold text-slate-500 uppercase">Calle</label>
+                                            <input type="text" name="calle_obra" required value={nuevaObra.calle_obra} onChange={handleNuevaObraChange} className="w-full bg-slate-50 border border-slate-200 rounded-lg py-1.5 px-3 text-sm focus:outline-none uppercase-input" />
+                                        </div>
+                                        <div>
+                                            <label className="block text-xs font-semibold text-slate-500 uppercase">Colonia</label>
+                                            <input type="text" name="colonia" required value={nuevaObra.colonia} onChange={handleNuevaObraChange} className="w-full bg-slate-50 border border-slate-200 rounded-lg py-1.5 px-3 text-sm focus:outline-none uppercase-input" />
+                                        </div>
+                                    </div>
+
+                                    <div>
+                                        <label className="block text-xs font-semibold text-slate-500 uppercase">Meta</label>
+                                        <input type="text" name="meta" required value={nuevaObra.meta} onChange={handleNuevaObraChange} className="w-full bg-slate-50 border border-slate-200 rounded-lg py-1.5 px-3 text-sm focus:outline-none uppercase-input" placeholder="Ej: 500 MTS2" />
+                                    </div>
+
+                                    <div className="grid grid-cols-2 gap-2">
+                                        <div>
+                                            <label className="block text-xs font-semibold text-slate-500 uppercase">Fecha Inicio</label>
+                                            <input type="date" name="fecha_inicio" required value={nuevaObra.fecha_inicio} onChange={handleNuevaObraChange} className="w-full bg-slate-50 border border-slate-200 rounded-lg py-1.5 px-3 text-sm focus:outline-none" />
+                                        </div>
+                                        <div>
+                                            <label className="block text-xs font-semibold text-slate-500 uppercase">Fecha Término</label>
+                                            <input type="date" name="fecha_termino" required value={nuevaObra.fecha_termino} onChange={handleNuevaObraChange} className="w-full bg-slate-50 border border-slate-200 rounded-lg py-1.5 px-3 text-sm focus:outline-none" />
+                                        </div>
+                                    </div>
+
+                                    <div>
+                                        <label className="block text-xs font-semibold text-slate-500 uppercase">Días Plazo (Autocalculado)</label>
+                                        <input type="number" disabled value={calcularDiasPlazo()} className="w-full bg-slate-100 border border-slate-200 rounded-lg py-1.5 px-3 text-sm text-slate-500 focus:outline-none font-medium" />
+                                    </div>
+
+                                    <div>
+                                        <label className="block text-xs font-semibold text-slate-500 uppercase">Geolocalización (Click en mapa)</label>
+                                        <input type="text" name="geolocalizacion" required value={nuevaObra.geolocalizacion} onChange={handleNuevaObraChange} className="w-full bg-slate-100 border border-slate-200 rounded-lg py-1.5 px-3 text-sm focus:outline-none text-slate-600 font-mono" placeholder="Lat, Lng del mapa" />
+                                    </div>
+
+                                    <div>
+                                        <label className="block text-xs font-semibold text-slate-500 uppercase">Supervisor</label>
+                                        <select name="supervisor" value={nuevaObra.supervisor} onChange={handleNuevaObraChange} className="w-full bg-slate-50 border border-slate-200 rounded-lg py-1.5 px-3 text-sm focus:outline-none">
+                                            {supervisoresDb.map((sup, sIdx) => (
+                                                <option key={sIdx} value={sup}>{sup}</option>
+                                            ))}
+                                            <option value="OTRO">+ Agregar nuevo supervisor</option>
+                                        </select>
+                                    </div>
+
+                                    {nuevaObra.supervisor === "OTRO" && (
+                                        <div>
+                                            <label className="block text-xs font-semibold text-slate-500 uppercase">Nuevo Supervisor (Nombre)</label>
+                                            <input type="text" name="nuevo_supervisor" required value={nuevaObra.nuevo_supervisor} onChange={handleNuevaObraChange} className="w-full bg-slate-50 border border-slate-200 rounded-lg py-1.5 px-3 text-sm focus:outline-none uppercase-input" placeholder="Ej: CARLOS GOMEZ" />
+                                        </div>
+                                    )}
+
+                                    <div className="grid grid-cols-2 gap-2">
+                                        <div>
+                                            <label className="block text-xs font-semibold text-slate-500 uppercase">Costo ($)</label>
+                                            <input type="number" step="0.01" name="costo" required value={nuevaObra.costo} onChange={handleNuevaObraChange} className="w-full bg-slate-50 border border-slate-200 rounded-lg py-1.5 px-3 text-sm focus:outline-none" />
+                                        </div>
+                                        <div>
+                                            <label className="block text-xs font-semibold text-slate-500 uppercase">Origen Recurso</label>
+                                            <input type="text" name="origen_recurso" required value={nuevaObra.origen_recurso} onChange={handleNuevaObraChange} className="w-full bg-slate-50 border border-slate-200 rounded-lg py-1.5 px-3 text-sm focus:outline-none uppercase-input" />
+                                        </div>
+                                    </div>
+
+                                    {modalMsg.text && (
+                                        <div className={`p-2.5 rounded-lg text-xs font-medium text-center ${modalMsg.type === 'error' ? 'bg-red-50 text-red-600' : modalMsg.type === 'success' ? 'bg-emerald-50 text-emerald-600' : 'bg-blue-50 text-blue-600'}`}>{modalMsg.text}</div>
+                                    )}
+
+                                    <div className="flex gap-2 pt-2 border-t">
+                                        <button type="button" onClick={() => setShowModal(false)} className="w-1/2 py-2 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-lg text-sm font-medium transition">Cancelar</button>
+                                        <button type="submit" disabled={loadingModal} className="w-1/2 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-sm font-medium transition">Guardar Obra</button>
+                                    </div>
+                                </form>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+
+</html>
